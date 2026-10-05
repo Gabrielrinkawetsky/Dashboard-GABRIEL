@@ -1,132 +1,215 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
-} from "recharts";
-import { pedidos } from "./data";
+  BarChart3, CheckCircle2, FileText, FolderKanban, LayoutDashboard, LogOut, Repeat, Search, Settings, SlidersHorizontal, Users, Wallet, XCircle,
+} from "lucide-react";
+import { api } from "./api";
+import { StoreProvider, useStore } from "./store";
+import { Skeleton } from "./ui";
+import { STAGES } from "./types";
+import Overview from "./pages/Overview";
+import Clients from "./pages/Clients";
+import Proposals from "./pages/Proposals";
+import Projects from "./pages/Projects";
+import Finance from "./pages/Finance";
+import RecurringPage from "./pages/Recurring";
+import Reports from "./pages/Reports";
+import SettingsPage from "./pages/Settings";
 
-const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-const periodos = [7, 15, 30] as const;
+const NAV = [
+  { id: "visao", label: "Visão geral", icon: LayoutDashboard },
+  { id: "clientes", label: "Clientes", icon: Users },
+  { id: "propostas", label: "Propostas", icon: FileText },
+  { id: "projetos", label: "Projetos", icon: FolderKanban },
+  { id: "financeiro", label: "Financeiro", icon: Wallet },
+  { id: "recorrencias", label: "Recorrências", icon: Repeat },
+  { id: "relatorios", label: "Relatórios", icon: BarChart3 },
+  { id: "config", label: "Configurações", icon: Settings },
+] as const;
+type PageId = (typeof NAV)[number]["id"];
 
-const badge = {
-  Pago: "bg-emerald-100 text-emerald-700",
-  Pendente: "bg-amber-100 text-amber-700",
-  Cancelado: "bg-rose-100 text-rose-700",
+const STATUS_OPTIONS: Partial<Record<PageId, string[]>> = {
+  propostas: ["rascunho", "enviada", "aprovada", "recusada", "expirada"],
+  projetos: [...STAGES, "Cancelado"],
+  financeiro: ["aberta", "parcial", "paga", "atrasada"],
+  recorrencias: ["ativo", "pausado", "cancelado"],
 };
+const PRESETS = [["mes", "Este mês"], ["30d", "30 dias"], ["90d", "90 dias"], ["ano", "Este ano"], ["tudo", "Tudo"], ["custom", "Personalizado"]] as const;
 
-export default function App() {
-  const [dias, setDias] = useState<number>(30);
+const pageFromHash = (): PageId => (NAV.find((n) => n.id === location.hash.slice(1))?.id ?? "visao");
 
-  const lista = useMemo(() => {
-    const max = pedidos.reduce((m, p) => (p.data > m ? p.data : m), "");
-    const corte = new Date(max);
-    corte.setDate(corte.getDate() - dias + 1);
-    const c = corte.toISOString().slice(0, 10);
-    return pedidos.filter((p) => p.data >= c);
-  }, [dias]);
+function Login({ onDone }: { onDone: () => void }) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    try { await api.login(pw); onDone(); } catch (x) { setErr(x instanceof Error ? x.message : "Erro"); }
+    setBusy(false);
+  };
+  return (
+    <div className="grid min-h-screen place-items-center p-4">
+      <form onSubmit={submit} className="glass w-full max-w-sm space-y-4 rounded-3xl p-7">
+        <div>
+          <div className="mb-3 grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-violet to-violet-strong text-lg font-bold text-[#14102a]">G</div>
+          <h1 className="text-xl font-bold">Painel do Gabriel</h1>
+          <p className="text-sm text-slate-400">Entre para acessar os dados da empresa.</p>
+        </div>
+        <input className="field" type="password" autoFocus placeholder="Senha de acesso" value={pw} onChange={(e) => setPw(e.target.value)} aria-label="Senha" />
+        {err && <p className="text-sm text-rose-300" role="alert">{err}</p>}
+        <button className="btn btn-primary w-full justify-center" disabled={busy || !pw}>{busy ? "Entrando…" : "Entrar"}</button>
+      </form>
+    </div>
+  );
+}
 
-  const pagos = lista.filter((p) => p.status === "Pago");
-  const receita = pagos.reduce((s, p) => s + p.valor, 0);
+function FilterBar({ page }: { page: PageId }) {
+  const { data, filters: f, setFilters, resetFilters } = useStore();
+  const [show, setShow] = useState(false); // no celular os filtros ficam recolhidos
+  if (page === "config") return null;
+  const statuses = STATUS_OPTIONS[page];
+  const usePeriod = !["clientes", "recorrencias", "projetos"].includes(page);
+  const useSvc = !["clientes", "recorrencias"].includes(page);
+  return (
+    <div className="glass mb-5 flex flex-wrap items-center gap-2 rounded-2xl p-3">
+      <div className="relative min-w-40 flex-1">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+        <input className="field pl-9" placeholder="Buscar…" aria-label="Buscar" value={f.q} onChange={(e) => setFilters({ q: e.target.value })} />
+      </div>
+      <button className="btn sm:hidden" aria-expanded={show} onClick={() => setShow(!show)}>
+        <SlidersHorizontal className="h-4 w-4" /> Filtros
+      </button>
+      <div className={`${show ? "flex" : "hidden"} w-full flex-wrap items-center gap-2 sm:contents`}>
+      {page !== "clientes" && (
+        <select className="field w-auto" aria-label="Cliente" value={f.clientId} onChange={(e) => setFilters({ clientId: e.target.value })}>
+          <option value="">Todos os clientes</option>
+          {data?.clients.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+        </select>
+      )}
+      {useSvc && (
+        <select className="field w-auto" aria-label="Serviço" value={f.service} onChange={(e) => setFilters({ service: e.target.value })}>
+          <option value="">Todos os serviços</option>
+          {data?.services.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+        </select>
+      )}
+      {statuses && (
+        <select className="field w-auto" aria-label="Status" value={f.status} onChange={(e) => setFilters({ status: e.target.value })}>
+          <option value="">Todos os status</option>
+          {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      )}
+      {usePeriod && (
+        <select className="field w-auto" aria-label="Período" value={f.preset} onChange={(e) => setFilters({ preset: e.target.value as typeof f.preset })}>
+          {PRESETS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      )}
+      {usePeriod && f.preset === "custom" && (
+        <>
+          <input className="field w-auto" type="date" aria-label="De" value={f.from} onChange={(e) => setFilters({ from: e.target.value })} />
+          <input className="field w-auto" type="date" aria-label="Até" value={f.to} onChange={(e) => setFilters({ to: e.target.value })} />
+        </>
+      )}
+      <button className="btn" onClick={resetFilters}>Limpar</button>
+      </div>
+    </div>
+  );
+}
 
-  const porDia = useMemo(() => {
-    const m = new Map<string, number>();
-    pagos.forEach((p) => m.set(p.data, (m.get(p.data) ?? 0) + p.valor));
-    return [...m].sort().map(([data, valor]) => ({ data: data.slice(5).split("-").reverse().join("/"), valor }));
-  }, [pagos]);
+function Toasts() {
+  const { toasts } = useStore();
+  return (
+    <div className="pointer-events-none fixed bottom-20 right-4 z-[60] flex flex-col gap-2 lg:bottom-4" aria-live="polite">
+      {toasts.map((t) => (
+        <div key={t.id} className={`glass pointer-events-auto flex items-center gap-2 rounded-xl px-4 py-3 text-sm shadow-xl ${t.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`} style={{ background: "#14141d" }}>
+          {t.kind === "ok" ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+          {t.text}
+        </div>
+      ))}
+    </div>
+  );
+}
 
-  const porProduto = useMemo(() => {
-    const m = new Map<string, number>();
-    pagos.forEach((p) => m.set(p.produto, (m.get(p.produto) ?? 0) + p.valor));
-    return [...m].map(([produto, valor]) => ({ produto, valor })).sort((a, b) => b.valor - a.valor);
-  }, [pagos]);
+function Shell({ onLogout }: { onLogout: () => void }) {
+  const { data, loading, loadError, reload, setFilters } = useStore();
+  const [page, setPage] = useState<PageId>(pageFromHash());
+  useEffect(() => {
+    const h = () => { setPage(pageFromHash()); setFilters({ status: "" }); };
+    window.addEventListener("hashchange", h);
+    return () => window.removeEventListener("hashchange", h);
+  }, [setFilters]);
+  const go = (id: string) => { location.hash = id; };
 
-  const kpis = [
-    { label: "Receita", value: brl(receita) },
-    { label: "Pedidos", value: String(lista.length) },
-    { label: "Ticket médio", value: brl(pagos.length ? receita / pagos.length : 0) },
-    { label: "Pendentes", value: String(lista.filter((p) => p.status === "Pendente").length) },
-  ];
+  const owner = data?.settings.owner_name || "Gabriel Ribeiro Silva";
+  const company = data?.settings.company_name || "Minha empresa";
+  const Page = { visao: Overview, clientes: Clients, propostas: Proposals, projetos: Projects, financeiro: Finance, recorrencias: RecurringPage, relatorios: Reports, config: SettingsPage }[page];
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Dashboard de Vendas</h1>
-        <div className="flex gap-1 rounded-lg bg-white p-1 shadow-sm">
-          {periodos.map((d) => (
-            <button
-              key={d}
-              onClick={() => setDias(d)}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                dias === d ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              {d} dias
+    <div className="flex min-h-screen">
+      <aside className="glass sticky top-0 m-4 hidden h-[calc(100vh-2rem)] w-60 shrink-0 flex-col rounded-3xl p-4 lg:flex">
+        <div className="mb-6 flex items-center gap-3 px-2">
+          <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-violet to-violet-strong font-bold text-[#14102a]">{company[0]?.toUpperCase()}</div>
+          <span className="truncate font-semibold">{company}</span>
+        </div>
+        <nav className="flex flex-1 flex-col gap-1">
+          {NAV.map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => go(id)} aria-current={page === id ? "page" : undefined}
+              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition ${page === id ? "bg-violet/15 text-violet" : "text-slate-400 hover:bg-white/5 hover:text-slate-100"}`}>
+              <Icon className="h-4 w-4" /> {label}
             </button>
           ))}
-        </div>
-      </header>
+        </nav>
+        <button onClick={onLogout} className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-400 hover:bg-white/5"><LogOut className="h-4 w-4" /> Sair</button>
+      </aside>
 
-      <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {kpis.map((k) => (
-          <div key={k.label} className="rounded-xl bg-white p-4 shadow-sm">
-            <p className="text-sm text-slate-500">{k.label}</p>
-            <p className="mt-1 text-2xl font-semibold">{k.value}</p>
+      <main className="min-w-0 flex-1 px-4 pb-28 pt-4 lg:px-4 lg:pb-8">
+        <header className="mb-5 flex items-center justify-between gap-3">
+          <div className="lg:hidden">
+            <p className="text-xs text-slate-400">{company}</p>
+            <p className="text-sm font-semibold">{NAV.find((n) => n.id === page)?.label}</p>
           </div>
+          <div className="hidden text-sm text-slate-400 lg:block">Olá, <span className="font-medium text-slate-100">{owner.split(" ")[0]}</span> 👋</div>
+          <div className="flex items-center gap-3">
+            <div className="text-right"><p className="text-sm font-medium leading-tight">{owner}</p><p className="text-xs text-slate-500">Administrador</p></div>
+            <div className="grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-violet to-violet-strong font-bold text-[#14102a]">{owner[0]}</div>
+            <button onClick={onLogout} className="rounded-lg p-2 text-slate-400 hover:bg-white/10 lg:hidden" aria-label="Sair"><LogOut className="h-4 w-4" /></button>
+          </div>
+        </header>
+
+        <FilterBar page={page} />
+
+        {loading ? (
+          <div className="space-y-4"><div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{[0, 1, 2, 3].map((i) => <Skeleton key={i} />)}</div><Skeleton className="h-64" /></div>
+        ) : loadError || !data ? (
+          <div className="glass rounded-2xl p-8 text-center">
+            <p className="mb-3 text-rose-300">{loadError}</p>
+            <button className="btn btn-primary" onClick={() => void reload()}>Tentar novamente</button>
+          </div>
+        ) : <Page go={go} />}
+      </main>
+
+      <nav className="glass fixed inset-x-0 bottom-0 z-40 flex overflow-x-auto px-2 py-2 lg:hidden" style={{ background: "rgba(14,14,22,.92)" }}>
+        {NAV.map(({ id, label, icon: Icon }) => (
+          <button key={id} onClick={() => go(id)} aria-label={label} aria-current={page === id ? "page" : undefined}
+            className={`flex min-w-[4.5rem] flex-1 flex-col items-center gap-1 rounded-xl px-2 py-1.5 text-[11px] ${page === id ? "bg-violet/15 text-violet" : "text-slate-400"}`}>
+            <Icon className="h-5 w-5" /> <span className="whitespace-nowrap">{label.split(" ")[0]}</span>
+          </button>
         ))}
-      </section>
-
-      <section className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-xl bg-white p-4 shadow-sm">
-          <h2 className="mb-3 font-semibold">Receita por dia</h2>
-          <ResponsiveContainer width="100%" height={260}>
-            <AreaChart data={porDia}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="data" fontSize={12} />
-              <YAxis fontSize={12} />
-              <Tooltip formatter={(v) => brl(Number(v))} />
-              <Area dataKey="valor" stroke="#0f172a" fill="#cbd5e1" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="rounded-xl bg-white p-4 shadow-sm">
-          <h2 className="mb-3 font-semibold">Receita por produto</h2>
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={porProduto}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="produto" fontSize={12} />
-              <YAxis fontSize={12} />
-              <Tooltip formatter={(v) => brl(Number(v))} />
-              <Bar dataKey="valor" fill="#0f172a" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </section>
-
-      <section className="overflow-x-auto rounded-xl bg-white p-4 shadow-sm">
-        <h2 className="mb-3 font-semibold">Últimos pedidos</h2>
-        <table className="w-full text-left text-sm">
-          <thead className="text-slate-500">
-            <tr>
-              {["Pedido", "Cliente", "Produto", "Data", "Valor", "Status"].map((h) => (
-                <th key={h} className="pb-2 font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {[...lista].sort((a, b) => b.data.localeCompare(a.data)).slice(0, 10).map((p) => (
-              <tr key={p.id} className="border-t border-slate-100">
-                <td className="py-2">{p.id}</td>
-                <td>{p.cliente}</td>
-                <td>{p.produto}</td>
-                <td>{p.data.split("-").reverse().join("/")}</td>
-                <td>{brl(p.valor)}</td>
-                <td>
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${badge[p.status]}`}>{p.status}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+      </nav>
+      <Toasts />
     </div>
+  );
+}
+
+export default function App() {
+  const [auth, setAuth] = useState<boolean | null>(null);
+  useEffect(() => { api.session().then((s) => setAuth(s.authenticated)).catch(() => setAuth(false)); }, []);
+  const out = useCallback(() => setAuth(false), []);
+  if (auth === null) return <div className="grid min-h-screen place-items-center"><Skeleton className="h-10 w-40" /></div>;
+  if (!auth) return <Login onDone={() => setAuth(true)} />;
+  return (
+    <StoreProvider onUnauthorized={out}>
+      <Shell onLogout={() => { void api.logout().finally(out); }} />
+    </StoreProvider>
   );
 }
