@@ -3,7 +3,9 @@ import type { Data } from "./types";
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+  // Requisições que gravam (POST/PUT/PATCH/DELETE) sempre enviam JSON: o servidor recusa corpo sem Content-Type JSON (proteção CSRF).
+  const write = method !== "GET";
+  const res = await fetch(url, { method, headers: write ? { "Content-Type": "application/json" } : undefined, body: write ? JSON.stringify(body ?? {}) : undefined });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, json.error ?? "Erro inesperado");
   return json as T;
@@ -11,7 +13,8 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
 
 export const api = {
   session: () => call<{ authenticated: boolean }>("GET", "/api/session"),
-  login: (password: string) => call("POST", "/api/login", { password }),
+  login: (username: string, password: string) => call("POST", "/api/login", { username, password }),
+  changePassword: (currentPassword: string, newPassword: string) => call("POST", "/api/change-password", { currentPassword, newPassword }),
   logout: () => call("POST", "/api/logout"),
   data: () => call<Data>("GET", "/api/data"),
   create: (t: string, b: unknown) => call<{ id: number }>("POST", `/api/${t}`, b),

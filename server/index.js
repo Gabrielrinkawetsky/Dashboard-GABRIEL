@@ -2,100 +2,193 @@ import express from "express";
 import { existsSync } from "node:fs";
 import { db, tx } from "./db.js";
 import { addMonths, today } from "./dates.js";
-import { generatedPassword, loginAllowed, makeToken, noteAttempt, readCookie, safeEqual, validToken } from "./auth.js";
+import { authenticate, changePassword, cookie, createSession, getSession, loginAllowed, revokeSession, safeEqual } from "./auth.js";
 import { removeDemo, seedDemo } from "./demo.js";
+import { Invalid, bool01, checklist, date, email, int, isDate, isPlainObject, money, oneOf, text } from "./validate.js";
 
 const app = express();
+app.disable("x-powered-by");
+// Atrás de proxy reverso (Nginx, Cloudflare...) defina TRUST_PROXY (ex.: 1) para o limite de tentativas usar o IP real do cliente.
+if (process.env.TRUST_PROXY) app.set("trust proxy", /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  // Google Fonts (index.html) precisa de style-src/font-src; sem isso a fonte é bloqueada em produção.
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+  if (process.env.NODE_ENV === "production") res.setHeader("Strict-Transport-Security", "max-age=31536000");
+  if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store");
+  if (req.path.startsWith("/api") && !["GET", "HEAD", "OPTIONS"].includes(req.method) && req.path !== "/api/webhooks/payments") {
+    if (!req.is("application/json")) return res.status(415).json({ error: "Envie JSON" });
+    if (req.get("sec-fetch-site") === "cross-site") return res.status(403).json({ error: "Origem não autorizada" });
+    const origin = req.get("origin");
+    const expected = process.env.APP_ORIGIN || (process.env.NODE_ENV === "production" ? "https" : req.protocol) + "://" + req.get("host");
+    const allowed = !process.env.APP_ORIGIN && process.env.NODE_ENV !== "production"
+      ? [expected, "http://localhost:5180", "http://127.0.0.1:5180"] : [expected];
+    if (origin && !allowed.includes(origin)) return res.status(403).json({ error: "Origem não autorizada" });
+  }
+  next();
+});
+app.use("/api/webhooks", express.json({ limit: "64kb" })); // webhook: corpo pequeno
 app.use(express.json({ limit: "1mb" }));
 const PORT = Number(process.env.PORT ?? 3001);
 const STAGES = ["Briefing", "Aguardando materiais", "Design", "Desenvolvimento", "Revisão", "Entregue"];
 const fail = (res, code, error) => res.status(code).json({ error });
 const bad = (msg, code = 422) => Object.assign(new Error(msg), { code });
+/** Id de rota: só dígitos; qualquer outra coisa é "não encontrado" (nunca chega ao banco). */
+const idParam = (req) => (/^\d{1,15}$/.test(req.params.id) ? Number(req.params.id) : null);
 
 // Saldo líquido (pagamentos − estornos) já recebido de uma parcela
 const net = (installmentId) =>
   db.prepare("SELECT COALESCE(SUM(CASE WHEN type='refund' THEN -amount ELSE amount END),0) AS n FROM payments WHERE installment_id=?").get(installmentId).n;
 
 // ---------- Webhook (autenticado por segredo próprio, fora da sessão) ----------
+// Limite de falhas de segredo por IP (em memória, por processo): barra tentativa de adivinhar o segredo.
+const hookFails = new Map();
+const hookBlocked = (ip) => { const e = hookFails.get(ip); return Boolean(e && e.reset > Date.now() && e.count >= 30); };
+const hookFail = (ip) => {
+  const now = Date.now();
+  if (hookFails.size > 5000) for (const [k, v] of hookFails) if (v.reset <= now) hookFails.delete(k);
+  const e = hookFails.get(ip);
+  if (!e || e.reset <= now) hookFails.set(ip, { count: 1, reset: now + 60_000 });
+  else e.count++;
+};
+const ID_RE = /^[A-Za-z0-9_.-]{1,100}$/; // sem ":" (separador do id de estorno)
+const PROVIDER_RE = /^[a-z0-9_-]{1,40}$/;
+
 app.post("/api/webhooks/payments", (req, res) => {
+  if (hookBlocked(req.ip)) { res.setHeader("Retry-After", "60"); return fail(res, 429, "Muitas tentativas"); }
   const secret = req.get("x-webhook-secret");
-  if (!secret || !safeEqual(secret, process.env.WEBHOOK_SECRET)) return fail(res, 401, "Segredo inválido");
-  const b = req.body ?? {};
-  const provider = String(b.provider ?? "generico");
-  if (!b.event_id || !b.type || !b.payment_id) return fail(res, 400, "event_id, type e payment_id são obrigatórios");
+  if (!secret || !safeEqual(secret, process.env.WEBHOOK_SECRET)) { hookFail(req.ip); return fail(res, 401, "Segredo inválido"); }
+  const b = req.body;
+  if (!isPlainObject(b)) return fail(res, 400, "Corpo JSON inválido");
+  // Formato validado ANTES de gravar qualquer coisa: um evento malformado nunca "envenena" a idempotência.
+  const provider = b.provider === undefined ? "generico" : b.provider;
+  if (typeof provider !== "string" || !PROVIDER_RE.test(provider)) return fail(res, 400, "provider inválido");
+  for (const k of ["event_id", "payment_id"]) if (typeof b[k] !== "string" || !ID_RE.test(b[k])) return fail(res, 400, `${k} inválido`);
+  if (!["payment.confirmed", "payment.refunded", "payment.canceled"].includes(b.type)) return fail(res, 422, "Tipo de evento não suportado");
   try {
+    const paidRaw = typeof b.paid_at === "string" ? b.paid_at.slice(0, 10) : b.paid_at;
+    const paidAt = b.paid_at === undefined ? today() : paidRaw;
+    if (!isDate(paidAt)) throw bad("paid_at inválido");
+    if (b.currency !== undefined && b.currency !== "BRL") throw bad("Moeda inválida: apenas BRL");
+    if (b.amount !== undefined && !(Number.isSafeInteger(b.amount) && b.amount > 0)) throw bad("amount deve ser um inteiro positivo em centavos");
     const out = tx(() => {
-      const seen = db.prepare("INSERT OR IGNORE INTO webhook_events (provider, event_id, payload) VALUES (?,?,?)").run(provider, String(b.event_id), JSON.stringify(b));
+      const seen = db.prepare("INSERT OR IGNORE INTO webhook_events (provider, event_id, payload) VALUES (?,?,?)").run(provider, b.event_id, JSON.stringify(b));
       if (!seen.changes) return { duplicate: true };
-      const paidAt = String(b.paid_at ?? today()).slice(0, 10);
       if (b.type === "payment.confirmed") {
-        const inst = db.prepare("SELECT * FROM installments WHERE id=?").get(Number(b.installment_id));
-        const amount = Math.round(Number(b.amount));
-        if (!inst || !(amount > 0)) throw bad("Parcela ou valor inválido");
-        if (amount > inst.amount - net(inst.id)) throw bad("Valor excede o saldo da parcela");
+        if (b.currency !== "BRL") throw bad("Moeda obrigatória: BRL");
+        if (b.amount === undefined) throw bad("amount obrigatório");
+        const inst = Number.isSafeInteger(b.installment_id) ? db.prepare("SELECT * FROM installments WHERE id=?").get(b.installment_id) : null;
+        if (!inst) throw bad("Parcela inexistente");
+        if (b.client_id !== undefined && b.client_id !== inst.client_id) throw bad("Cliente do evento não corresponde à parcela");
+        if (b.amount > inst.amount - net(inst.id)) throw bad("Valor excede o saldo da parcela");
         const r = db.prepare("INSERT OR IGNORE INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'payment', ?,?,?,?)")
-          .run(inst.id, inst.client_id, inst.project_id, amount, paidAt, provider, String(b.payment_id), "Confirmado via integração");
+          .run(inst.id, inst.client_id, inst.project_id, b.amount, paidAt, provider, b.payment_id, "Confirmado via integração");
         return { duplicate: !r.changes };
       }
-      if (b.type === "payment.refunded" || b.type === "payment.canceled") {
-        const orig = db.prepare("SELECT * FROM payments WHERE source=? AND external_id=? AND type='payment'").get(provider, String(b.payment_id));
-        if (!orig) throw bad("Pagamento original não encontrado");
-        const refunded = db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE source=? AND external_id LIKE ? AND type='refund'").get(provider, `${orig.external_id}:%`).s;
-        const amount = Math.round(Number(b.amount ?? orig.amount - refunded));
-        if (!(amount > 0) || amount > orig.amount - refunded) throw bad("Valor de estorno inválido");
-        db.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'refund', ?,?,?,?)")
-          .run(orig.installment_id, orig.client_id, orig.project_id, amount, paidAt, provider, `${orig.external_id}:${b.event_id}`, b.type === "payment.canceled" ? "Cancelamento via integração" : "Estorno via integração");
-        return { duplicate: false };
-      }
-      throw bad("Tipo de evento não suportado");
+      // estorno / cancelamento
+      const orig = db.prepare("SELECT * FROM payments WHERE source=? AND external_id=? AND type='payment'").get(provider, b.payment_id);
+      if (!orig) throw bad("Pagamento original não encontrado");
+      // Prefixo exato (instr), nunca LIKE: "_" e "%" em ids do provedor seriam curingas e misturariam pagamentos.
+      const refunded = db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE source=? AND type='refund' AND instr(external_id, ?) = 1").get(provider, `${orig.external_id}:`).s;
+      const amount = b.amount ?? orig.amount - refunded;
+      if (!(amount > 0) || amount > orig.amount - refunded) throw bad("Valor de estorno inválido");
+      db.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'refund', ?,?,?,?)")
+        .run(orig.installment_id, orig.client_id, orig.project_id, amount, paidAt, provider, `${orig.external_id}:${b.event_id}`, b.type === "payment.canceled" ? "Cancelamento via integração" : "Estorno via integração");
+      return { duplicate: false };
     });
     res.json({ ok: true, ...out });
   } catch (e) {
-    fail(res, e.code === 422 ? 422 : 500, e.code === 422 ? e.message : "Erro ao processar evento");
+    if (e.code === 422) return fail(res, 422, e.message);
+    console.error("[webhook] erro ao processar evento:", e.message);
+    fail(res, 500, "Erro ao processar evento");
   }
 });
 
 // ---------- Autenticação ----------
-app.post("/api/login", (req, res) => {
-  const ip = req.ip;
-  if (!loginAllowed(ip)) return fail(res, 429, "Muitas tentativas. Aguarde um minuto.");
-  if (!safeEqual(req.body?.password ?? "", process.env.ADMIN_PASSWORD)) { noteAttempt(ip); return fail(res, 401, "Senha incorreta"); }
-  res.setHeader("Set-Cookie", `session=${makeToken()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${7 * 86400}`);
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body ?? {};
+  if (typeof username !== "string" || username.length > 80 || typeof password !== "string" || password.length > 128) return fail(res, 400, "Dados de acesso inválidos");
+  const name = username.trim().toLowerCase();
+  if (!loginAllowed(req.ip, name)) { res.setHeader("Retry-After", "900"); return fail(res, 429, "Muitas tentativas. Aguarde 15 minutos."); }
+  const user = await authenticate(name, password);
+  if (!user) return fail(res, 401, "Usuário ou senha incorretos");
+  revokeSession(req);
+  res.setHeader("Set-Cookie", cookie(createSession(user.id)));
   res.json({ ok: true });
 });
-app.post("/api/logout", (_req, res) => {
-  res.setHeader("Set-Cookie", "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+app.post("/api/logout", (req, res) => {
+  revokeSession(req);
+  res.setHeader("Set-Cookie", cookie());
   res.json({ ok: true });
 });
-app.get("/api/session", (req, res) => res.json({ authenticated: validToken(readCookie(req, "session")) }));
-
-app.use("/api", (req, res, next) => (validToken(readCookie(req, "session")) ? next() : fail(res, 401, "Não autenticado")));
+app.get("/api/session", (req, res) => {
+  const user = getSession(req);
+  res.json({ authenticated: Boolean(user), username: user?.username });
+});
+app.use("/api", (req, res, next) => {
+  const user = getSession(req);
+  if (!user) return fail(res, 401, "Não autenticado");
+  req.authUser = user;
+  next();
+});
+app.post("/api/change-password", async (req, res) => {
+  const { currentPassword, newPassword } = req.body ?? {};
+  if (typeof currentPassword !== "string" || currentPassword.length > 128 || typeof newPassword !== "string" || newPassword.length < 15 || newPassword.length > 128) return fail(res, 400, "A nova senha deve ter entre 15 e 128 caracteres");
+  if (!loginAllowed(req.ip, req.authUser.username)) return fail(res, 429, "Muitas tentativas. Aguarde 15 minutos.");
+  if (!await authenticate(req.authUser.username, currentPassword)) return fail(res, 401, "Senha atual incorreta");
+  if (newPassword === currentPassword) return fail(res, 400, "Escolha uma senha diferente da atual");
+  await changePassword(req.authUser.id, newPassword);
+  res.setHeader("Set-Cookie", cookie(createSession(req.authUser.id)));
+  res.json({ ok: true });
+});
 
 // ---------- Dados ----------
-const TABLES = {
-  clients: { cols: ["name", "company", "email", "phone", "notes"], req: ["name"] },
-  services: { cols: ["name", "default_price", "active"], req: ["name"], ints: ["default_price", "active"] },
-  proposals: { cols: ["client_id", "service", "scope", "value", "deadline", "valid_until", "status"], req: ["client_id", "service", "value"], ints: ["client_id", "value"] },
-  projects: { cols: ["client_id", "name", "service", "scope", "stage", "deadline", "owner", "progress", "checklist", "notes", "links", "cancelled"], req: ["client_id", "service"], ints: ["client_id", "progress", "cancelled"] },
-  expenses: { cols: ["project_id", "description", "amount", "date"], req: ["description", "amount", "date"], ints: ["project_id", "amount"] },
-  recurring: { cols: ["client_id", "name", "kind", "amount", "period", "status", "next_due"], req: ["client_id", "name", "amount"], ints: ["client_id", "amount"] },
-};
+// Campos permitidos por tabela, com validação estrita (tipo, tamanho, intervalo, data real, enum). O resto é ignorado.
 const PROPOSAL_STATUS = ["rascunho", "enviada", "aprovada", "recusada", "expirada"];
+const SPEC = {
+  clients: {
+    name: (v) => text(v, "nome", 120, true), company: (v) => text(v, "empresa", 120), email: (v) => email(v),
+    phone: (v) => text(v, "telefone", 40), notes: (v) => text(v, "observações", 4000),
+  },
+  services: { name: (v) => text(v, "nome", 80, true), default_price: (v) => int(v, "preço padrão", { min: 0, max: 100_000_000_000 }) ?? 0, active: (v) => bool01(v, "ativo") },
+  proposals: {
+    client_id: (v) => int(v, "cliente", { min: 1 }), service: (v) => text(v, "serviço", 80, true), scope: (v) => text(v, "escopo", 4000),
+    value: (v) => money(v, "valor"), deadline: (v) => date(v, "prazo"), valid_until: (v) => date(v, "validade"), status: (v) => oneOf(v, "status", PROPOSAL_STATUS),
+  },
+  projects: {
+    client_id: (v) => int(v, "cliente", { min: 1 }), name: (v) => text(v, "nome", 160), service: (v) => text(v, "serviço", 80, true),
+    scope: (v) => text(v, "escopo", 4000), stage: (v) => oneOf(v, "etapa", STAGES), deadline: (v) => date(v, "prazo"),
+    owner: (v) => text(v, "responsável", 120), progress: (v) => int(v, "progresso", { min: 0, max: 100 }) ?? 0,
+    checklist: (v) => JSON.stringify(checklist(v)), notes: (v) => text(v, "observações", 4000), links: (v) => text(v, "links", 4000), cancelled: (v) => bool01(v, "cancelado"),
+  },
+  expenses: { project_id: (v) => int(v, "projeto", { min: 1 }), description: (v) => text(v, "descrição", 200, true), amount: (v) => money(v, "valor"), date: (v) => date(v, "data") },
+  recurring: {
+    client_id: (v) => int(v, "cliente", { min: 1 }), name: (v) => text(v, "nome", 120, true), kind: (v) => text(v, "tipo", 40), amount: (v) => money(v, "valor"),
+    period: (v) => oneOf(v, "periodicidade", ["mensal", "trimestral", "anual"]), status: (v) => oneOf(v, "situação", ["ativo", "pausado", "cancelado"]), next_due: (v) => date(v, "próxima cobrança"),
+  },
+};
+const REQUIRED = {
+  clients: ["name"], services: ["name"], proposals: ["client_id", "service", "value"], projects: ["client_id", "service"],
+  expenses: ["description", "amount", "date"], recurring: ["client_id", "name", "amount"],
+};
+const NOT_NULL = { proposals: ["status"], projects: ["stage"], recurring: ["period", "status"] };
+const exists = (table, id) => Boolean(db.prepare(`SELECT 1 FROM ${table} WHERE id=?`).get(id));
 
 const clean = (t, body, partial) => {
-  const cfg = TABLES[t], out = {};
-  for (const c of cfg.cols) {
-    if (!(c in body)) continue;
-    let v = body[c];
-    if (c === "checklist") v = JSON.stringify(Array.isArray(v) ? v : []);
-    else if (cfg.ints?.includes(c)) v = v === "" || v == null ? null : Math.round(Number(v));
-    else if (typeof v === "string") v = v.trim();
-    out[c] = v === "" ? null : v;
+  if (!isPlainObject(body)) throw new Invalid("Corpo JSON inválido");
+  const out = {};
+  for (const [col, parse] of Object.entries(SPEC[t])) {
+    if (!Object.hasOwn(body, col)) continue;
+    out[col] = parse(body[col]);
+    if (out[col] === null && REQUIRED[t].includes(col)) throw new Invalid(`Campo obrigatório: ${col}`);
   }
-  if (!partial) for (const r of cfg.req) if (out[r] == null || Number.isNaN(out[r])) throw bad(`Campo obrigatório: ${r}`, 400);
-  if (out.stage && !STAGES.includes(out.stage)) throw bad("Etapa inválida", 400);
-  if (t === "proposals" && out.status && !PROPOSAL_STATUS.includes(out.status)) throw bad("Status inválido", 400);
-  for (const k of ["value", "amount"]) if (k in out && !(out[k] > 0)) throw bad("Valor deve ser maior que zero", 400);
+  // Colunas NOT NULL com valor padrão: vazio = "não informado" (mantém o valor atual / o padrão), nunca NULL.
+  for (const c of NOT_NULL[t] ?? []) if (out[c] === null) delete out[c];
+  if (!partial) for (const r of REQUIRED[t]) if (!(r in out)) throw new Invalid(`Campo obrigatório: ${r}`);
+  if (out.client_id != null && !exists("clients", out.client_id)) throw new Invalid("Cliente inexistente");
+  if (out.project_id != null && !exists("projects", out.project_id)) throw new Invalid("Projeto inexistente");
   return out;
 };
 
@@ -114,9 +207,14 @@ app.get("/api/data", (_req, res) => {
 app.get("/api/webhook-secret", (_req, res) => res.json({ secret: process.env.WEBHOOK_SECRET }));
 
 app.put("/api/settings", (req, res) => {
-  const ins = db.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
-  tx(() => { for (const [k, v] of Object.entries(req.body ?? {})) if (["company_name", "owner_name", "email", "phone"].includes(k)) ins.run(k, String(v ?? "")); });
-  res.json({ ok: true });
+  try {
+    if (!isPlainObject(req.body)) throw new Invalid("Corpo JSON inválido");
+    const rules = { company_name: (v) => text(v, "empresa", 120), owner_name: (v) => text(v, "responsável", 120), email: (v) => email(v), phone: (v) => text(v, "telefone", 40) };
+    const ins = db.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    const values = Object.entries(rules).filter(([k]) => Object.hasOwn(req.body, k)).map(([k, parse]) => [k, parse(req.body[k]) ?? ""]);
+    tx(() => { for (const [k, v] of values) ins.run(k, v); });
+    res.json({ ok: true });
+  } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 
 app.post("/api/demo", (_req, res) => res.json({ seeded: seedDemo() }));
@@ -124,14 +222,18 @@ app.delete("/api/demo", (_req, res) => { removeDemo(); res.json({ ok: true }); }
 
 // Aprovar proposta: cria projeto e parcelas uma única vez
 app.post("/api/proposals/:id/approve", (req, res) => {
-  const p = db.prepare("SELECT * FROM proposals WHERE id=?").get(Number(req.params.id));
+  const id = idParam(req);
+  const p = id === null ? undefined : db.prepare("SELECT * FROM proposals WHERE id=?").get(id);
   if (!p) return fail(res, 404, "Proposta não encontrada");
   if (p.status === "aprovada" || db.prepare("SELECT 1 FROM projects WHERE proposal_id=?").get(p.id)) return fail(res, 409, "Proposta já aprovada");
-  const entrada = Math.round(Number(req.body?.entrada ?? 0));
-  const parcelas = Math.max(1, Math.min(24, Math.round(Number(req.body?.parcelas ?? 1))));
-  if (!(entrada >= 0) || entrada >= p.value) return fail(res, 400, "Entrada deve ser menor que o valor total");
-  const first = String(req.body?.primeiro_vencimento || today()).slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(first)) return fail(res, 400, "Data do primeiro vencimento inválida");
+  let entrada, parcelas, first;
+  try {
+    const b = isPlainObject(req.body) ? req.body : {};
+    entrada = int(b.entrada ?? 0, "entrada", { min: 0, max: 100_000_000_000 }) ?? 0;
+    parcelas = int(b.parcelas ?? 1, "parcelas", { min: 1, max: 24 }) ?? 1;
+    first = date(b.primeiro_vencimento, "primeiro vencimento") ?? today();
+  } catch (e) { return fail(res, 400, e.message); }
+  if (entrada >= p.value) return fail(res, 400, "Entrada deve ser menor que o valor total");
   try {
     const projectId = tx(() => {
       db.prepare("UPDATE proposals SET status='aprovada', decided_at=? WHERE id=?").run(today(), p.id);
@@ -153,64 +255,89 @@ app.post("/api/proposals/:id/approve", (req, res) => {
     res.json({ ok: true, project_id: projectId });
   } catch (e) {
     const dup = String(e.message).includes("UNIQUE");
+    if (!dup) console.error("[aprovar] erro:", e.message);
     fail(res, dup ? 409 : 500, dup ? "Proposta já aprovada" : "Erro ao aprovar");
   }
 });
 
 // Pagamento manual (total ou parcial)
 app.post("/api/payments", (req, res) => {
-  const b = req.body ?? {};
-  const amount = Math.round(Number(b.amount));
-  const inst = db.prepare("SELECT * FROM installments WHERE id=?").get(Number(b.installment_id));
-  if (!inst) return fail(res, 400, "Selecione a parcela");
-  if (!(amount > 0)) return fail(res, 400, "Informe um valor maior que zero");
-  if (amount > inst.amount - net(inst.id)) return fail(res, 400, "Valor maior que o saldo da parcela");
-  db.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, note) VALUES (?,?,?,?, 'payment', ?, 'manual', ?)")
-    .run(inst.id, inst.client_id, inst.project_id, amount, String(b.paid_at || today()).slice(0, 10), b.note ? String(b.note) : null);
-  res.json({ ok: true });
+  try {
+    const b = isPlainObject(req.body) ? req.body : {};
+    const installmentId = int(b.installment_id, "parcela", { min: 1, required: true });
+    const amount = money(b.amount, "valor", true);
+    const paidAt = date(b.paid_at, "data do pagamento") ?? today();
+    const note = text(b.note, "observação", 500);
+    const inst = db.prepare("SELECT * FROM installments WHERE id=?").get(installmentId);
+    if (!inst) return fail(res, 400, "Parcela inexistente");
+    if (amount > inst.amount - net(inst.id)) return fail(res, 400, "Valor maior que o saldo da parcela");
+    db.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, note) VALUES (?,?,?,?, 'payment', ?, 'manual', ?)")
+      .run(inst.id, inst.client_id, inst.project_id, amount, paidAt, note);
+    res.json({ ok: true });
+  } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 app.delete("/api/payments/:id", (req, res) => {
-  const r = db.prepare("DELETE FROM payments WHERE id=? AND source='manual'").run(Number(req.params.id));
+  const id = idParam(req);
+  const r = id === null ? { changes: 0 } : db.prepare("DELETE FROM payments WHERE id=? AND source='manual'").run(id);
   r.changes ? res.json({ ok: true }) : fail(res, 400, "Só é possível excluir lançamentos manuais");
 });
 
 // Cobrança avulsa (parcela sem proposta)
 app.post("/api/installments", (req, res) => {
-  const b = req.body ?? {};
-  const amount = Math.round(Number(b.amount));
-  if (!b.client_id || !(amount > 0) || !b.due_date) return fail(res, 400, "Cliente, valor e vencimento são obrigatórios");
-  db.prepare("INSERT INTO installments (client_id, project_id, proposal_id, label, amount, due_date) VALUES (?,?,?,?,?,?)")
-    .run(Number(b.client_id), b.project_id ? Number(b.project_id) : null, null, b.label || "Cobrança avulsa", amount, String(b.due_date).slice(0, 10));
-  res.json({ ok: true });
+  try {
+    const b = isPlainObject(req.body) ? req.body : {};
+    const clientId = int(b.client_id, "cliente", { min: 1, required: true });
+    const projectId = int(b.project_id, "projeto", { min: 1 });
+    const amount = money(b.amount, "valor", true);
+    const dueDate = date(b.due_date, "vencimento", true);
+    const label = text(b.label, "descrição", 120) ?? "Cobrança avulsa";
+    if (!exists("clients", clientId)) throw new Invalid("Cliente inexistente");
+    if (projectId !== null && !db.prepare("SELECT 1 FROM projects WHERE id=? AND client_id=?").get(projectId, clientId)) throw new Invalid("Projeto inexistente para este cliente");
+    db.prepare("INSERT INTO installments (client_id, project_id, proposal_id, label, amount, due_date) VALUES (?,?,?,?,?,?)").run(clientId, projectId, null, label, amount, dueDate);
+    res.json({ ok: true });
+  } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 
 app.post("/api/projects/:id/notes", (req, res) => {
-  const text = String(req.body?.text ?? "").trim();
-  if (!text) return fail(res, 400, "Escreva uma anotação");
-  db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(Number(req.params.id), text);
-  res.json({ ok: true });
+  try {
+    const id = idParam(req);
+    if (id === null || !exists("projects", id)) return fail(res, 404, "Projeto não encontrado");
+    const body = isPlainObject(req.body) ? req.body : {};
+    const noteText = text(body.text, "anotação", 2000, true);
+    db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(id, noteText);
+    res.json({ ok: true });
+  } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 
 // CRUD genérico
-for (const t of Object.keys(TABLES)) {
+for (const t of Object.keys(SPEC)) {
   app.post(`/api/${t}`, (req, res) => {
     try {
-      const d = clean(t, req.body ?? {}, false);
+      const d = clean(t, req.body, false);
       if (t === "proposals" && d.status === "aprovada") d.status = "enviada"; // aprovação só pelo fluxo próprio
       const keys = Object.keys(d);
       const id = Number(db.prepare(`INSERT INTO ${t} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`).run(...keys.map((k) => d[k])).lastInsertRowid);
       if (t === "projects") db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(id, "Projeto criado");
       res.json({ id });
-    } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
+    } catch (e) {
+      if (!e.code) console.error(`[${t}] erro ao salvar:`, e.message);
+      fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar");
+    }
   });
   app.patch(`/api/${t}/:id`, (req, res) => {
     try {
-      const id = Number(req.params.id);
-      const before = db.prepare(`SELECT * FROM ${t} WHERE id=?`).get(id);
+      const id = idParam(req);
+      const before = id === null ? undefined : db.prepare(`SELECT * FROM ${t} WHERE id=?`).get(id);
       if (!before) return fail(res, 404, "Registro não encontrado");
-      const d = clean(t, req.body ?? {}, true);
+      const d = clean(t, req.body, true);
       if (t === "proposals" && d.status === "aprovada" && before.status !== "aprovada") return fail(res, 400, "Use o botão Aprovar para criar o projeto e as parcelas");
-      if (t === "proposals" && before.status === "aprovada") delete d.status;
+      if (t === "proposals" && before.status === "aprovada") {
+        delete d.status;
+        // Depois de aprovada, valor/cliente/serviço já geraram projeto e parcelas: mudar aqui deixaria o financeiro inconsistente.
+        for (const k of ["value", "client_id", "service"]) if (k in d && d[k] !== before[k]) throw new Invalid("Proposta aprovada: valor, cliente e serviço não podem ser alterados", 409);
+      }
+      if (t === "projects" && "client_id" in d && d.client_id !== before.client_id
+        && (before.proposal_id || db.prepare("SELECT 1 FROM installments WHERE project_id=?").get(id))) throw new Invalid("Projeto com proposta ou cobranças não pode trocar de cliente", 409);
       if (t === "proposals" && ["recusada", "expirada"].includes(d.status) && before.status !== d.status) d.decided_at = today();
       const keys = Object.keys(d);
       if (!keys.length) return res.json({ ok: true });
@@ -225,20 +352,35 @@ for (const t of Object.keys(TABLES)) {
         }
       });
       res.json({ ok: true });
-    } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
+    } catch (e) {
+      if (!e.code) console.error(`[${t}] erro ao salvar:`, e.message);
+      fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar");
+    }
   });
   app.delete(`/api/${t}/:id`, (req, res) => {
-    try { db.prepare(`DELETE FROM ${t} WHERE id=?`).run(Number(req.params.id)); res.json({ ok: true }); }
+    const id = idParam(req);
+    if (id === null) return fail(res, 404, "Registro não encontrado");
+    try { db.prepare(`DELETE FROM ${t} WHERE id=?`).run(id); res.json({ ok: true }); }
     catch { fail(res, 409, "Há registros vinculados; remova-os antes."); }
   });
 }
+
+// Rota /api inexistente e erros: sempre JSON genérico, sem stack nem caminhos internos.
+app.use("/api", (_req, res) => fail(res, 404, "Não encontrado"));
 
 if (existsSync("dist")) {
   app.use(express.static("dist"));
   app.get(/^(?!\/api).*/, (_req, res) => res.sendFile("index.html", { root: "dist" }));
 }
 
-app.listen(PORT, () => {
+app.use((err, _req, res, _next) => {
+  if (err?.type === "entity.parse.failed") return fail(res, 400, "JSON inválido");
+  if (err?.type === "entity.too.large") return fail(res, 413, "Corpo grande demais");
+  console.error("[erro]", err?.message ?? err);
+  fail(res, 500, "Erro interno");
+});
+
+// Por padrão só aceita conexões locais; atrás de proxy reverso mantenha 127.0.0.1. Use HOST=0.0.0.0 só se souber o que está expondo.
+app.listen(PORT, process.env.HOST || "127.0.0.1", () => {
   console.log(`API em http://localhost:${PORT}`);
-  if (generatedPassword) console.log(`\n>>> Senha de acesso gerada (salva em .env): ${generatedPassword}\n`);
 });

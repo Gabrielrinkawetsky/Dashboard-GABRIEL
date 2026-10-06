@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import Login from "./Login";
+import { useCallback, useEffect, useState } from "react";
 import {
   BarChart3, CheckCircle2, FileText, FolderKanban, LayoutDashboard, LogOut, Repeat, Search, Settings, SlidersHorizontal, Users, Wallet, XCircle,
 } from "lucide-react";
@@ -36,33 +37,6 @@ const STATUS_OPTIONS: Partial<Record<PageId, string[]>> = {
 const PRESETS = [["mes", "Este mês"], ["30d", "30 dias"], ["90d", "90 dias"], ["ano", "Este ano"], ["tudo", "Tudo"], ["custom", "Personalizado"]] as const;
 
 const pageFromHash = (): PageId => (NAV.find((n) => n.id === location.hash.slice(1))?.id ?? "visao");
-
-function Login({ onDone }: { onDone: () => void }) {
-  const [pw, setPw] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setErr("");
-    try { await api.login(pw); onDone(); } catch (x) { setErr(x instanceof Error ? x.message : "Erro"); }
-    setBusy(false);
-  };
-  return (
-    <div className="grid min-h-screen place-items-center p-4">
-      <form onSubmit={submit} className="glass w-full max-w-sm space-y-4 rounded-3xl p-7">
-        <div>
-          <div className="mb-3 grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-violet to-violet-strong text-lg font-bold text-[#14102a]">G</div>
-          <h1 className="text-xl font-bold">Painel do Gabriel</h1>
-          <p className="text-sm text-slate-400">Entre para acessar os dados da empresa.</p>
-        </div>
-        <input className="field" type="password" autoFocus placeholder="Senha de acesso" value={pw} onChange={(e) => setPw(e.target.value)} aria-label="Senha" />
-        {err && <p className="text-sm text-rose-300" role="alert">{err}</p>}
-        <button className="btn btn-primary w-full justify-center" disabled={busy || !pw}>{busy ? "Entrando…" : "Entrar"}</button>
-      </form>
-    </div>
-  );
-}
 
 function FilterBar({ page }: { page: PageId }) {
   const { data, filters: f, setFilters, resetFilters } = useStore();

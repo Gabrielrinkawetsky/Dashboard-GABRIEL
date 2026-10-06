@@ -1,3 +1,4 @@
+import PasswordSettings from "../PasswordSettings";
 import { useState, type FormEvent } from "react";
 import { Copy, Eye, EyeOff, Plus } from "lucide-react";
 import { api } from "../api";
@@ -31,6 +32,7 @@ export default function SettingsPage(_: PageProps) {
     <>
       <PageHeader title="Configurações" />
       <div className="grid gap-4 xl:grid-cols-2 [&>*]:min-w-0">
+        <PasswordSettings />
         <Card>
           <Title>Dados da empresa</Title>
           <form onSubmit={save} className="space-y-3">
