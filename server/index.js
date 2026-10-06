@@ -8,7 +8,7 @@ import { Invalid, bool01, checklist, date, email, int, isDate, isPlainObject, mo
 
 const app = express();
 app.disable("x-powered-by");
-// Atrás de proxy reverso (Nginx, Cloudflare...) defina TRUST_PROXY (ex.: 1) para o limite de tentativas usar o IP real do cliente.
+// Atrás de proxy reverso (Vercel, Nginx, Cloudflare...) defina TRUST_PROXY (ex.: 1) para o limite de tentativas usar o IP real do cliente.
 if (process.env.TRUST_PROXY) app.set("trust proxy", /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -38,12 +38,12 @@ const bad = (msg, code = 422) => Object.assign(new Error(msg), { code });
 /** Id de rota: só dígitos; qualquer outra coisa é "não encontrado" (nunca chega ao banco). */
 const idParam = (req) => (/^\d{1,15}$/.test(req.params.id) ? Number(req.params.id) : null);
 
-// Saldo líquido (pagamentos − estornos) já recebido de uma parcela
-const net = (installmentId) =>
-  db.prepare("SELECT COALESCE(SUM(CASE WHEN type='refund' THEN -amount ELSE amount END),0) AS n FROM payments WHERE installment_id=?").get(installmentId).n;
+// Saldo líquido (pagamentos − estornos) já recebido de uma parcela. "d" é o banco ou a transação em andamento.
+const net = async (d, installmentId) =>
+  (await d.prepare("SELECT COALESCE(SUM(CASE WHEN type='refund' THEN -amount ELSE amount END),0) AS n FROM payments WHERE installment_id=?").get(installmentId)).n;
 
 // ---------- Webhook (autenticado por segredo próprio, fora da sessão) ----------
-// Limite de falhas de segredo por IP (em memória, por processo): barra tentativa de adivinhar o segredo.
+// Limite de falhas de segredo por IP (em memória, por instância): barra tentativa de adivinhar o segredo.
 const hookFails = new Map();
 const hookBlocked = (ip) => { const e = hookFails.get(ip); return Boolean(e && e.reset > Date.now() && e.count >= 30); };
 const hookFail = (ip) => {
@@ -56,7 +56,7 @@ const hookFail = (ip) => {
 const ID_RE = /^[A-Za-z0-9_.-]{1,100}$/; // sem ":" (separador do id de estorno)
 const PROVIDER_RE = /^[a-z0-9_-]{1,40}$/;
 
-app.post("/api/webhooks/payments", (req, res) => {
+app.post("/api/webhooks/payments", async (req, res) => {
   if (hookBlocked(req.ip)) { res.setHeader("Retry-After", "60"); return fail(res, 429, "Muitas tentativas"); }
   const secret = req.get("x-webhook-secret");
   if (!secret || !safeEqual(secret, process.env.WEBHOOK_SECRET)) { hookFail(req.ip); return fail(res, 401, "Segredo inválido"); }
@@ -73,28 +73,28 @@ app.post("/api/webhooks/payments", (req, res) => {
     if (!isDate(paidAt)) throw bad("paid_at inválido");
     if (b.currency !== undefined && b.currency !== "BRL") throw bad("Moeda inválida: apenas BRL");
     if (b.amount !== undefined && !(Number.isSafeInteger(b.amount) && b.amount > 0)) throw bad("amount deve ser um inteiro positivo em centavos");
-    const out = tx(() => {
-      const seen = db.prepare("INSERT OR IGNORE INTO webhook_events (provider, event_id, payload) VALUES (?,?,?)").run(provider, b.event_id, JSON.stringify(b));
+    const out = await tx(async (d) => {
+      const seen = await d.prepare("INSERT OR IGNORE INTO webhook_events (provider, event_id, payload) VALUES (?,?,?)").run(provider, b.event_id, JSON.stringify(b));
       if (!seen.changes) return { duplicate: true };
       if (b.type === "payment.confirmed") {
         if (b.currency !== "BRL") throw bad("Moeda obrigatória: BRL");
         if (b.amount === undefined) throw bad("amount obrigatório");
-        const inst = Number.isSafeInteger(b.installment_id) ? db.prepare("SELECT * FROM installments WHERE id=?").get(b.installment_id) : null;
+        const inst = Number.isSafeInteger(b.installment_id) ? await d.prepare("SELECT * FROM installments WHERE id=?").get(b.installment_id) : null;
         if (!inst) throw bad("Parcela inexistente");
         if (b.client_id !== undefined && b.client_id !== inst.client_id) throw bad("Cliente do evento não corresponde à parcela");
-        if (b.amount > inst.amount - net(inst.id)) throw bad("Valor excede o saldo da parcela");
-        const r = db.prepare("INSERT OR IGNORE INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'payment', ?,?,?,?)")
+        if (b.amount > inst.amount - await net(d, inst.id)) throw bad("Valor excede o saldo da parcela");
+        const r = await d.prepare("INSERT OR IGNORE INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'payment', ?,?,?,?)")
           .run(inst.id, inst.client_id, inst.project_id, b.amount, paidAt, provider, b.payment_id, "Confirmado via integração");
         return { duplicate: !r.changes };
       }
       // estorno / cancelamento
-      const orig = db.prepare("SELECT * FROM payments WHERE source=? AND external_id=? AND type='payment'").get(provider, b.payment_id);
+      const orig = await d.prepare("SELECT * FROM payments WHERE source=? AND external_id=? AND type='payment'").get(provider, b.payment_id);
       if (!orig) throw bad("Pagamento original não encontrado");
       // Prefixo exato (instr), nunca LIKE: "_" e "%" em ids do provedor seriam curingas e misturariam pagamentos.
-      const refunded = db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE source=? AND type='refund' AND instr(external_id, ?) = 1").get(provider, `${orig.external_id}:`).s;
+      const refunded = (await d.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE source=? AND type='refund' AND instr(external_id, ?) = 1").get(provider, `${orig.external_id}:`)).s;
       const amount = b.amount ?? orig.amount - refunded;
       if (!(amount > 0) || amount > orig.amount - refunded) throw bad("Valor de estorno inválido");
-      db.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'refund', ?,?,?,?)")
+      await d.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, external_id, note) VALUES (?,?,?,?, 'refund', ?,?,?,?)")
         .run(orig.installment_id, orig.client_id, orig.project_id, amount, paidAt, provider, `${orig.external_id}:${b.event_id}`, b.type === "payment.canceled" ? "Cancelamento via integração" : "Estorno via integração");
       return { duplicate: false };
     });
@@ -111,24 +111,24 @@ app.post("/api/login", async (req, res) => {
   const { username, password } = req.body ?? {};
   if (typeof username !== "string" || username.length > 80 || typeof password !== "string" || password.length > 128) return fail(res, 400, "Dados de acesso inválidos");
   const name = username.trim().toLowerCase();
-  if (!loginAllowed(req.ip, name)) { res.setHeader("Retry-After", "900"); return fail(res, 429, "Muitas tentativas. Aguarde 15 minutos."); }
+  if (!await loginAllowed(req.ip, name)) { res.setHeader("Retry-After", "900"); return fail(res, 429, "Muitas tentativas. Aguarde 15 minutos."); }
   const user = await authenticate(name, password);
   if (!user) return fail(res, 401, "Usuário ou senha incorretos");
-  revokeSession(req);
-  res.setHeader("Set-Cookie", cookie(createSession(user.id)));
+  await revokeSession(req);
+  res.setHeader("Set-Cookie", cookie(await createSession(user.id)));
   res.json({ ok: true });
 });
-app.post("/api/logout", (req, res) => {
-  revokeSession(req);
+app.post("/api/logout", async (req, res) => {
+  await revokeSession(req);
   res.setHeader("Set-Cookie", cookie());
   res.json({ ok: true });
 });
-app.get("/api/session", (req, res) => {
-  const user = getSession(req);
+app.get("/api/session", async (req, res) => {
+  const user = await getSession(req);
   res.json({ authenticated: Boolean(user), username: user?.username });
 });
-app.use("/api", (req, res, next) => {
-  const user = getSession(req);
+app.use("/api", async (req, res, next) => {
+  const user = await getSession(req);
   if (!user) return fail(res, 401, "Não autenticado");
   req.authUser = user;
   next();
@@ -136,11 +136,11 @@ app.use("/api", (req, res, next) => {
 app.post("/api/change-password", async (req, res) => {
   const { currentPassword, newPassword } = req.body ?? {};
   if (typeof currentPassword !== "string" || currentPassword.length > 128 || typeof newPassword !== "string" || newPassword.length < 15 || newPassword.length > 128) return fail(res, 400, "A nova senha deve ter entre 15 e 128 caracteres");
-  if (!loginAllowed(req.ip, req.authUser.username)) return fail(res, 429, "Muitas tentativas. Aguarde 15 minutos.");
+  if (!await loginAllowed(req.ip, req.authUser.username)) return fail(res, 429, "Muitas tentativas. Aguarde 15 minutos.");
   if (!await authenticate(req.authUser.username, currentPassword)) return fail(res, 401, "Senha atual incorreta");
   if (newPassword === currentPassword) return fail(res, 400, "Escolha uma senha diferente da atual");
   await changePassword(req.authUser.id, newPassword);
-  res.setHeader("Set-Cookie", cookie(createSession(req.authUser.id)));
+  res.setHeader("Set-Cookie", cookie(await createSession(req.authUser.id)));
   res.json({ ok: true });
 });
 
@@ -174,9 +174,15 @@ const REQUIRED = {
   expenses: ["description", "amount", "date"], recurring: ["client_id", "name", "amount"],
 };
 const NOT_NULL = { proposals: ["status"], projects: ["stage"], recurring: ["period", "status"] };
-const exists = (table, id) => Boolean(db.prepare(`SELECT 1 FROM ${table} WHERE id=?`).get(id));
+// Quem aponta para cada tabela. Checado no código para valer em qualquer banco (as chaves estrangeiras são só a segunda barreira).
+const CHILDREN = {
+  clients: ["proposals.client_id", "projects.client_id", "installments.client_id", "recurring.client_id", "payments.client_id"],
+  proposals: ["projects.proposal_id", "installments.proposal_id"],
+  projects: ["installments.project_id", "expenses.project_id", "payments.project_id"],
+};
+const exists = async (table, id) => Boolean(await db.prepare(`SELECT 1 FROM ${table} WHERE id=?`).get(id));
 
-const clean = (t, body, partial) => {
+const clean = async (t, body, partial) => {
   if (!isPlainObject(body)) throw new Invalid("Corpo JSON inválido");
   const out = {};
   for (const [col, parse] of Object.entries(SPEC[t])) {
@@ -187,45 +193,47 @@ const clean = (t, body, partial) => {
   // Colunas NOT NULL com valor padrão: vazio = "não informado" (mantém o valor atual / o padrão), nunca NULL.
   for (const c of NOT_NULL[t] ?? []) if (out[c] === null) delete out[c];
   if (!partial) for (const r of REQUIRED[t]) if (!(r in out)) throw new Invalid(`Campo obrigatório: ${r}`);
-  if (out.client_id != null && !exists("clients", out.client_id)) throw new Invalid("Cliente inexistente");
-  if (out.project_id != null && !exists("projects", out.project_id)) throw new Invalid("Projeto inexistente");
+  if (out.client_id != null && !await exists("clients", out.client_id)) throw new Invalid("Cliente inexistente");
+  if (out.project_id != null && !await exists("projects", out.project_id)) throw new Invalid("Projeto inexistente");
   return out;
 };
 
-app.get("/api/data", (_req, res) => {
+app.get("/api/data", async (_req, res) => {
   const all = (t, order = "id DESC") => db.prepare(`SELECT * FROM ${t} ORDER BY ${order}`).all();
-  const settings = Object.fromEntries(db.prepare("SELECT key, value FROM settings").all().map((r) => [r.key, r.value]));
+  const [clients, services, proposals, projects, history, installments, payments, expenses, recurring, settingRows] = await Promise.all([
+    all("clients"), all("services", "id"), all("proposals"), all("projects"), all("project_history"), all("installments", "due_date"),
+    all("payments", "paid_at DESC, id DESC"), all("expenses"), all("recurring"), db.prepare("SELECT key, value FROM settings").all(),
+  ]);
   res.json({
-    clients: all("clients"), services: all("services", "id"), proposals: all("proposals"),
-    projects: all("projects").map((p) => ({ ...p, checklist: JSON.parse(p.checklist || "[]") })),
-    history: all("project_history"), installments: all("installments", "due_date"), payments: all("payments", "paid_at DESC, id DESC"),
-    expenses: all("expenses"), recurring: all("recurring"), settings,
+    clients, services, proposals, projects: projects.map((p) => ({ ...p, checklist: JSON.parse(p.checklist || "[]") })),
+    history, installments, payments, expenses, recurring, settings: Object.fromEntries(settingRows.map((r) => [r.key, r.value])),
     integration: { webhookConfigured: Boolean(process.env.WEBHOOK_SECRET), providerConnected: false },
   });
 });
 
 app.get("/api/webhook-secret", (_req, res) => res.json({ secret: process.env.WEBHOOK_SECRET }));
 
-app.put("/api/settings", (req, res) => {
+app.put("/api/settings", async (req, res) => {
   try {
     if (!isPlainObject(req.body)) throw new Invalid("Corpo JSON inválido");
     const rules = { company_name: (v) => text(v, "empresa", 120), owner_name: (v) => text(v, "responsável", 120), email: (v) => email(v), phone: (v) => text(v, "telefone", 40) };
-    const ins = db.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
     const values = Object.entries(rules).filter(([k]) => Object.hasOwn(req.body, k)).map(([k, parse]) => [k, parse(req.body[k]) ?? ""]);
-    tx(() => { for (const [k, v] of values) ins.run(k, v); });
+    await tx(async (d) => {
+      for (const [k, v] of values) await d.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(k, v);
+    });
     res.json({ ok: true });
   } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 
-app.post("/api/demo", (_req, res) => res.json({ seeded: seedDemo() }));
-app.delete("/api/demo", (_req, res) => { removeDemo(); res.json({ ok: true }); });
+app.post("/api/demo", async (_req, res) => res.json({ seeded: await seedDemo() }));
+app.delete("/api/demo", async (_req, res) => { await removeDemo(); res.json({ ok: true }); });
 
 // Aprovar proposta: cria projeto e parcelas uma única vez
-app.post("/api/proposals/:id/approve", (req, res) => {
+app.post("/api/proposals/:id/approve", async (req, res) => {
   const id = idParam(req);
-  const p = id === null ? undefined : db.prepare("SELECT * FROM proposals WHERE id=?").get(id);
+  const p = id === null ? undefined : await db.prepare("SELECT * FROM proposals WHERE id=?").get(id);
   if (!p) return fail(res, 404, "Proposta não encontrada");
-  if (p.status === "aprovada" || db.prepare("SELECT 1 FROM projects WHERE proposal_id=?").get(p.id)) return fail(res, 409, "Proposta já aprovada");
+  if (p.status === "aprovada" || await db.prepare("SELECT 1 FROM projects WHERE proposal_id=?").get(p.id)) return fail(res, 409, "Proposta já aprovada");
   let entrada, parcelas, first;
   try {
     const b = isPlainObject(req.body) ? req.body : {};
@@ -235,55 +243,61 @@ app.post("/api/proposals/:id/approve", (req, res) => {
   } catch (e) { return fail(res, 400, e.message); }
   if (entrada >= p.value) return fail(res, 400, "Entrada deve ser menor que o valor total");
   try {
-    const projectId = tx(() => {
-      db.prepare("UPDATE proposals SET status='aprovada', decided_at=? WHERE id=?").run(today(), p.id);
-      const owner = db.prepare("SELECT value FROM settings WHERE key='owner_name'").get()?.value || "Gabriel Ribeiro Silva";
-      const cl = db.prepare("SELECT name, company FROM clients WHERE id=?").get(p.client_id);
-      const pid = Number(db.prepare("INSERT INTO projects (proposal_id, client_id, name, service, scope, deadline, owner, checklist) VALUES (?,?,?,?,?,?,?,?)")
+    const projectId = await tx(async (d) => {
+      // Reconfere DENTRO da transação (uma por vez): duas aprovações simultâneas nunca criam dois projetos.
+      const current = await d.prepare("SELECT status FROM proposals WHERE id=?").get(p.id);
+      if (current?.status === "aprovada" || await d.prepare("SELECT 1 FROM projects WHERE proposal_id=?").get(p.id)) throw bad("Proposta já aprovada", 409);
+      await d.prepare("UPDATE proposals SET status='aprovada', decided_at=? WHERE id=?").run(today(), p.id);
+      const owner = (await d.prepare("SELECT value FROM settings WHERE key='owner_name'").get())?.value || "Gabriel Ribeiro Silva";
+      const cl = await d.prepare("SELECT name, company FROM clients WHERE id=?").get(p.client_id);
+      const pid = Number((await d.prepare("INSERT INTO projects (proposal_id, client_id, name, service, scope, deadline, owner, checklist) VALUES (?,?,?,?,?,?,?,?)")
         .run(p.id, p.client_id, `${p.service} · ${cl.company || cl.name}`, p.service, p.scope, p.deadline, owner,
-          JSON.stringify([{ text: "Briefing recebido", done: false }, { text: "Materiais do cliente", done: false }, { text: "Layout aprovado", done: false }, { text: "Publicação", done: false }])).lastInsertRowid);
-      db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(pid, "Projeto criado a partir da proposta aprovada");
-      const ins = db.prepare("INSERT INTO installments (proposal_id, project_id, client_id, label, amount, due_date) VALUES (?,?,?,?,?,?)");
+          JSON.stringify([{ text: "Briefing recebido", done: false }, { text: "Materiais do cliente", done: false }, { text: "Layout aprovado", done: false }, { text: "Publicação", done: false }]))).lastInsertRowid);
+      await d.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(pid, "Projeto criado a partir da proposta aprovada");
+      const ins = d.prepare("INSERT INTO installments (proposal_id, project_id, client_id, label, amount, due_date) VALUES (?,?,?,?,?,?)");
       const rest = p.value - entrada, base = Math.floor(rest / parcelas);
-      if (entrada > 0) ins.run(p.id, pid, p.client_id, "Entrada", entrada, today());
+      if (entrada > 0) await ins.run(p.id, pid, p.client_id, "Entrada", entrada, today());
       for (let i = 0; i < parcelas; i++) {
         const label = entrada > 0 || parcelas > 1 ? `Parcela ${i + 1}/${parcelas}` : "Pagamento único";
-        ins.run(p.id, pid, p.client_id, label, i === parcelas - 1 ? rest - base * (parcelas - 1) : base, addMonths(first, i));
+        await ins.run(p.id, pid, p.client_id, label, i === parcelas - 1 ? rest - base * (parcelas - 1) : base, addMonths(first, i));
       }
       return pid;
     });
     res.json({ ok: true, project_id: projectId });
   } catch (e) {
+    if (e.code === 409) return fail(res, 409, e.message);
     const dup = String(e.message).includes("UNIQUE");
     if (!dup) console.error("[aprovar] erro:", e.message);
     fail(res, dup ? 409 : 500, dup ? "Proposta já aprovada" : "Erro ao aprovar");
   }
 });
 
-// Pagamento manual (total ou parcial)
-app.post("/api/payments", (req, res) => {
+// Pagamento manual (total ou parcial). Checar o saldo e gravar acontecem na MESMA transação (uma por vez).
+app.post("/api/payments", async (req, res) => {
   try {
     const b = isPlainObject(req.body) ? req.body : {};
     const installmentId = int(b.installment_id, "parcela", { min: 1, required: true });
     const amount = money(b.amount, "valor", true);
     const paidAt = date(b.paid_at, "data do pagamento") ?? today();
     const note = text(b.note, "observação", 500);
-    const inst = db.prepare("SELECT * FROM installments WHERE id=?").get(installmentId);
-    if (!inst) return fail(res, 400, "Parcela inexistente");
-    if (amount > inst.amount - net(inst.id)) return fail(res, 400, "Valor maior que o saldo da parcela");
-    db.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, note) VALUES (?,?,?,?, 'payment', ?, 'manual', ?)")
-      .run(inst.id, inst.client_id, inst.project_id, amount, paidAt, note);
+    await tx(async (d) => {
+      const inst = await d.prepare("SELECT * FROM installments WHERE id=?").get(installmentId);
+      if (!inst) throw new Invalid("Parcela inexistente");
+      if (amount > inst.amount - await net(d, inst.id)) throw new Invalid("Valor maior que o saldo da parcela");
+      await d.prepare("INSERT INTO payments (installment_id, client_id, project_id, amount, type, paid_at, source, note) VALUES (?,?,?,?, 'payment', ?, 'manual', ?)")
+        .run(inst.id, inst.client_id, inst.project_id, amount, paidAt, note);
+    });
     res.json({ ok: true });
   } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
-app.delete("/api/payments/:id", (req, res) => {
+app.delete("/api/payments/:id", async (req, res) => {
   const id = idParam(req);
-  const r = id === null ? { changes: 0 } : db.prepare("DELETE FROM payments WHERE id=? AND source='manual'").run(id);
+  const r = id === null ? { changes: 0 } : await db.prepare("DELETE FROM payments WHERE id=? AND source='manual'").run(id);
   r.changes ? res.json({ ok: true }) : fail(res, 400, "Só é possível excluir lançamentos manuais");
 });
 
 // Cobrança avulsa (parcela sem proposta)
-app.post("/api/installments", (req, res) => {
+app.post("/api/installments", async (req, res) => {
   try {
     const b = isPlainObject(req.body) ? req.body : {};
     const clientId = int(b.client_id, "cliente", { min: 1, required: true });
@@ -291,45 +305,45 @@ app.post("/api/installments", (req, res) => {
     const amount = money(b.amount, "valor", true);
     const dueDate = date(b.due_date, "vencimento", true);
     const label = text(b.label, "descrição", 120) ?? "Cobrança avulsa";
-    if (!exists("clients", clientId)) throw new Invalid("Cliente inexistente");
-    if (projectId !== null && !db.prepare("SELECT 1 FROM projects WHERE id=? AND client_id=?").get(projectId, clientId)) throw new Invalid("Projeto inexistente para este cliente");
-    db.prepare("INSERT INTO installments (client_id, project_id, proposal_id, label, amount, due_date) VALUES (?,?,?,?,?,?)").run(clientId, projectId, null, label, amount, dueDate);
+    if (!await exists("clients", clientId)) throw new Invalid("Cliente inexistente");
+    if (projectId !== null && !await db.prepare("SELECT 1 FROM projects WHERE id=? AND client_id=?").get(projectId, clientId)) throw new Invalid("Projeto inexistente para este cliente");
+    await db.prepare("INSERT INTO installments (client_id, project_id, proposal_id, label, amount, due_date) VALUES (?,?,?,?,?,?)").run(clientId, projectId, null, label, amount, dueDate);
     res.json({ ok: true });
   } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 
-app.post("/api/projects/:id/notes", (req, res) => {
+app.post("/api/projects/:id/notes", async (req, res) => {
   try {
     const id = idParam(req);
-    if (id === null || !exists("projects", id)) return fail(res, 404, "Projeto não encontrado");
+    if (id === null || !await exists("projects", id)) return fail(res, 404, "Projeto não encontrado");
     const body = isPlainObject(req.body) ? req.body : {};
     const noteText = text(body.text, "anotação", 2000, true);
-    db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(id, noteText);
+    await db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(id, noteText);
     res.json({ ok: true });
   } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
 
 // CRUD genérico
 for (const t of Object.keys(SPEC)) {
-  app.post(`/api/${t}`, (req, res) => {
+  app.post(`/api/${t}`, async (req, res) => {
     try {
-      const d = clean(t, req.body, false);
+      const d = await clean(t, req.body, false);
       if (t === "proposals" && d.status === "aprovada") d.status = "enviada"; // aprovação só pelo fluxo próprio
       const keys = Object.keys(d);
-      const id = Number(db.prepare(`INSERT INTO ${t} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`).run(...keys.map((k) => d[k])).lastInsertRowid);
-      if (t === "projects") db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(id, "Projeto criado");
+      const id = Number((await db.prepare(`INSERT INTO ${t} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`).run(...keys.map((k) => d[k]))).lastInsertRowid);
+      if (t === "projects") await db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)").run(id, "Projeto criado");
       res.json({ id });
     } catch (e) {
       if (!e.code) console.error(`[${t}] erro ao salvar:`, e.message);
       fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar");
     }
   });
-  app.patch(`/api/${t}/:id`, (req, res) => {
+  app.patch(`/api/${t}/:id`, async (req, res) => {
     try {
       const id = idParam(req);
-      const before = id === null ? undefined : db.prepare(`SELECT * FROM ${t} WHERE id=?`).get(id);
+      const before = id === null ? undefined : await db.prepare(`SELECT * FROM ${t} WHERE id=?`).get(id);
       if (!before) return fail(res, 404, "Registro não encontrado");
-      const d = clean(t, req.body, true);
+      const d = await clean(t, req.body, true);
       if (t === "proposals" && d.status === "aprovada" && before.status !== "aprovada") return fail(res, 400, "Use o botão Aprovar para criar o projeto e as parcelas");
       if (t === "proposals" && before.status === "aprovada") {
         delete d.status;
@@ -337,18 +351,18 @@ for (const t of Object.keys(SPEC)) {
         for (const k of ["value", "client_id", "service"]) if (k in d && d[k] !== before[k]) throw new Invalid("Proposta aprovada: valor, cliente e serviço não podem ser alterados", 409);
       }
       if (t === "projects" && "client_id" in d && d.client_id !== before.client_id
-        && (before.proposal_id || db.prepare("SELECT 1 FROM installments WHERE project_id=?").get(id))) throw new Invalid("Projeto com proposta ou cobranças não pode trocar de cliente", 409);
+        && (before.proposal_id || await db.prepare("SELECT 1 FROM installments WHERE project_id=?").get(id))) throw new Invalid("Projeto com proposta ou cobranças não pode trocar de cliente", 409);
       if (t === "proposals" && ["recusada", "expirada"].includes(d.status) && before.status !== d.status) d.decided_at = today();
       const keys = Object.keys(d);
       if (!keys.length) return res.json({ ok: true });
-      tx(() => {
-        db.prepare(`UPDATE ${t} SET ${keys.map((k) => `${k}=?`).join(",")} WHERE id=?`).run(...keys.map((k) => d[k]), id);
+      await tx(async (q) => {
+        await q.prepare(`UPDATE ${t} SET ${keys.map((k) => `${k}=?`).join(",")} WHERE id=?`).run(...keys.map((k) => d[k]), id);
         if (t === "projects") {
-          const h = db.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)");
-          if (d.stage && d.stage !== before.stage) h.run(id, `Etapa: ${before.stage} → ${d.stage}`);
-          if ("cancelled" in d && d.cancelled !== before.cancelled) h.run(id, d.cancelled ? "Projeto cancelado" : "Projeto reaberto");
-          if (d.deadline && d.deadline !== before.deadline) h.run(id, "Prazo alterado");
-          if (d.owner && d.owner !== before.owner) h.run(id, `Responsável: ${d.owner}`);
+          const h = q.prepare("INSERT INTO project_history (project_id, text) VALUES (?,?)");
+          if (d.stage && d.stage !== before.stage) await h.run(id, `Etapa: ${before.stage} → ${d.stage}`);
+          if ("cancelled" in d && d.cancelled !== before.cancelled) await h.run(id, d.cancelled ? "Projeto cancelado" : "Projeto reaberto");
+          if (d.deadline && d.deadline !== before.deadline) await h.run(id, "Prazo alterado");
+          if (d.owner && d.owner !== before.owner) await h.run(id, `Responsável: ${d.owner}`);
         }
       });
       res.json({ ok: true });
@@ -357,10 +371,14 @@ for (const t of Object.keys(SPEC)) {
       fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar");
     }
   });
-  app.delete(`/api/${t}/:id`, (req, res) => {
+  app.delete(`/api/${t}/:id`, async (req, res) => {
     const id = idParam(req);
     if (id === null) return fail(res, 404, "Registro não encontrado");
-    try { db.prepare(`DELETE FROM ${t} WHERE id=?`).run(id); res.json({ ok: true }); }
+    for (const ref of CHILDREN[t] ?? []) {
+      const [table, col] = ref.split(".");
+      if (await db.prepare(`SELECT 1 FROM ${table} WHERE ${col}=? LIMIT 1`).get(id)) return fail(res, 409, "Há registros vinculados; remova-os antes.");
+    }
+    try { await db.prepare(`DELETE FROM ${t} WHERE id=?`).run(id); res.json({ ok: true }); }
     catch { fail(res, 409, "Há registros vinculados; remova-os antes."); }
   });
 }
@@ -368,7 +386,8 @@ for (const t of Object.keys(SPEC)) {
 // Rota /api inexistente e erros: sempre JSON genérico, sem stack nem caminhos internos.
 app.use("/api", (_req, res) => fail(res, 404, "Não encontrado"));
 
-if (existsSync("dist")) {
+// Fora da Vercel (npm start) o próprio servidor entrega o build; na Vercel quem entrega os arquivos é a CDN.
+if (!process.env.VERCEL && existsSync("dist")) {
   app.use(express.static("dist"));
   app.get(/^(?!\/api).*/, (_req, res) => res.sendFile("index.html", { root: "dist" }));
 }
@@ -380,7 +399,11 @@ app.use((err, _req, res, _next) => {
   fail(res, 500, "Erro interno");
 });
 
-// Por padrão só aceita conexões locais; atrás de proxy reverso mantenha 127.0.0.1. Use HOST=0.0.0.0 só se souber o que está expondo.
-app.listen(PORT, process.env.HOST || "127.0.0.1", () => {
-  console.log(`API em http://localhost:${PORT}`);
-});
+// Na Vercel o app é exportado como função (api/index.js); fora dela escuta em 127.0.0.1 por padrão.
+// Atrás de proxy reverso mantenha 127.0.0.1. Use HOST=0.0.0.0 só se souber o que está expondo.
+if (!process.env.VERCEL) {
+  app.listen(PORT, process.env.HOST || "127.0.0.1", () => {
+    console.log(`API em http://localhost:${PORT}`);
+  });
+}
+export default app;

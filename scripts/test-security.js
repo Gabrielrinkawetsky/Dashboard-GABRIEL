@@ -15,7 +15,7 @@ process.env.WEBHOOK_SECRET = WEBHOOK;
 const { db } = await import("../server/db.js");
 const { hashPassword } = await import("../server/auth.js");
 const PASSWORD = "test-only-password-123456";
-db.prepare("INSERT INTO auth_users(username,password_hash) VALUES (?,?)").run("tester", await hashPassword(PASSWORD));
+await db.prepare("INSERT INTO auth_users(username,password_hash) VALUES (?,?)").run("tester", await hashPassword(PASSWORD));
 
 const children = [];
 async function startServer(env = {}) {
@@ -213,6 +213,18 @@ await t("B9", "concorrência: 10 pagamentos simultâneos que juntos excedem a pa
   ok(paid <= 100000, `recebido ${paid} > parcela`);
 });
 
+await t("B10", "vínculos protegidos pelo banco: não exclui cliente com proposta, nem proposta aprovada, nem parcela com pagamento", async () => {
+  const c = await mkClient("Vinculado"); const p = await mkProposal(c, 100000);
+  eq((await api("clients/" + c, "DELETE")).status, 409, "cliente com proposta");
+  const { proposal, client, inst } = await mkInstallment(100000);
+  eq((await api("proposals/" + proposal, "DELETE")).status, 409, "proposta aprovada (tem projeto)");
+  eq((await api("clients/" + client, "DELETE")).status, 409, "cliente com projeto/parcelas");
+  eq((await api("payments", "POST", { installment_id: inst[0].id, amount: 1000 })).status, 200);
+  const d = await data(); const proj = d.projects.find((x) => x.proposal_id === proposal);
+  eq((await api("projects/" + proj.id, "DELETE")).status, 409, "projeto com parcelas");
+  ok((await data()).proposals.some((x) => x.id === p), "proposta ainda existe");
+});
+
 console.log("\n== 3. Webhook de pagamentos ==");
 await t("W1", "sem segredo / segredo errado / tamanho diferente → 401; nada é gravado", async () => {
   const { inst } = await mkInstallment(50000); const np = await count("payments");
@@ -343,7 +355,7 @@ await t("X3", "o código do navegador não usa HTML dinâmico perigoso nem guard
 // ====================================================================================================
 for (const c of children) c.kill();
 await new Promise((r) => setTimeout(r, 300));
-db.close();
+await db.close();
 process.chdir(project);
 rmSync(testDir, { recursive: true, force: true });
 const failed = results.filter((r) => !r[2]);

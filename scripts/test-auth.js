@@ -12,7 +12,7 @@ process.env.WEBHOOK_SECRET = 'test-only-webhook-secret';
 const { db } = await import('../server/db.js');
 const { hashPassword, cookie } = await import('../server/auth.js');
 const password = 'test-only-password-123456';
-db.prepare('INSERT INTO auth_users(username,password_hash) VALUES (?,?)').run('tester', await hashPassword(password));
+await db.prepare('INSERT INTO auth_users(username,password_hash) VALUES (?,?)').run('tester', await hashPassword(password));
 const port = 23000 + Math.floor(Math.random() * 10000);
 const base = `http://localhost:${port}`;
 const child = spawn(process.execPath, [path.join(project, 'server/index.js')], { cwd: testDir, env: { ...process.env, PORT: String(port), NODE_ENV: 'test' }, stdio: ['ignore','pipe','pipe'] });
@@ -44,9 +44,9 @@ try {
   assert.equal((await call('data','GET',undefined,token(changed))).status,200);
   assert.equal((await login()).status,401);
   const newLogin=await call('login','POST',{username:'tester',password:newPassword});assert.equal(newLogin.status,200);
-  const activeToken=token(newLogin);db.prepare('UPDATE auth_sessions SET expires=0').run();
+  const activeToken=token(newLogin);await db.prepare('UPDATE auth_sessions SET expires=0').run();
   assert.equal((await call('data','GET',undefined,activeToken)).status,401);
-  const hash=db.prepare('SELECT password_hash FROM auth_users').get().password_hash;
+  const hash=(await db.prepare('SELECT password_hash FROM auth_users').get()).password_hash;
   assert.ok(!hash.includes(newPassword));
   for(let i=0;i<12;i++) await call('login','POST',{username:'tester',password:'wrong'});
   assert.equal((await login()).status,429);
@@ -54,7 +54,7 @@ try {
   console.log('PASS: private API, credential validation, CSRF, cookies, logout, password change, session expiry and rate limiting.');
 } finally {
   child.kill(); await new Promise(resolve=>{if(child.exitCode!==null) resolve();else child.once('exit',resolve);});
-  db.close();process.chdir(initial);
+  await db.close();process.chdir(initial);
   if (path.dirname(testDir) !== path.resolve(tmpdir()) || !path.basename(testDir).startsWith('dashboard-auth-test-')) throw new Error('Unexpected cleanup path');
   rmSync(testDir,{recursive:true,force:true});
 }

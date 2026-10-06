@@ -1,12 +1,57 @@
-import { DatabaseSync } from "node:sqlite";
+// Banco de dados: libSQL (SQLite). Em produção (Vercel) usa o Turso; localmente, o arquivo data/app.db.
+//   TURSO_DATABASE_URL  libsql://seu-banco.turso.io   (vazio = arquivo local file:data/app.db)
+//   TURSO_AUTH_TOKEN    token do banco (só no servidor)
+// A interface imita a anterior (prepare().get/all/run), agora assíncrona: use sempre "await".
 import { mkdirSync } from "node:fs";
 
-mkdirSync("data", { recursive: true });
-export const db = new DatabaseSync("data/app.db");
-db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+const remote = Boolean(process.env.TURSO_DATABASE_URL);
+// Remoto (Turso): cliente web, 100% JavaScript (funciona na Vercel sem binário nativo). Local: cliente com suporte a arquivo.
+const { createClient } = remote ? await import("@libsql/client/web") : await import("@libsql/client");
+if (!remote) mkdirSync("data", { recursive: true });
+export const client = createClient({
+  url: process.env.TURSO_DATABASE_URL || "file:data/app.db",
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
 
-// Todos os valores monetários são inteiros em centavos.
-db.exec(`
+const plain = (rs, row) => Object.fromEntries(rs.columns.map((c, i) => [c, row[i]]));
+const norm = (args) => args.map((a) => (a === undefined ? null : a));
+
+/** Cria a interface (prepare/exec) sobre uma função que executa SQL — o cliente normal ou uma transação. */
+const wrap = (execute, executeMultiple) => ({
+  prepare: (sql) => ({
+    get: async (...args) => { const rs = await execute({ sql, args: norm(args) }); return rs.rows[0] ? plain(rs, rs.rows[0]) : undefined; },
+    all: async (...args) => { const rs = await execute({ sql, args: norm(args) }); return rs.rows.map((r) => plain(rs, r)); },
+    run: async (...args) => { const rs = await execute({ sql, args: norm(args) }); return { changes: rs.rowsAffected, lastInsertRowid: Number(rs.lastInsertRowid ?? 0) }; },
+  }),
+  exec: (sql) => executeMultiple(sql),
+});
+
+export const db = {
+  ...wrap((s) => client.execute(s), (sql) => client.executeMultiple(sql)),
+  close: () => client.close(),
+};
+
+/**
+ * Transação de escrita: tudo ou nada, e uma por vez (BEGIN IMMEDIATE). A função recebe a interface da transação
+ * ("d") — dentro dela use sempre d.prepare(...), nunca db.prepare(...), senão a consulta sai da transação.
+ */
+export async function tx(fn) {
+  const t = await client.transaction("write");
+  try {
+    const result = await fn(wrap((s) => t.execute(s), (sql) => t.executeMultiple(sql)));
+    await t.commit();
+    return result;
+  } catch (e) {
+    await t.rollback().catch(() => {});
+    throw e;
+  } finally {
+    t.close();
+  }
+}
+
+// Esquema. Todos os valores monetários são inteiros em centavos.
+if (!remote) await client.execute("PRAGMA foreign_keys = ON").catch(() => {});
+await client.executeMultiple(`
 CREATE TABLE IF NOT EXISTS services (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, default_price INTEGER DEFAULT 0, active INTEGER DEFAULT 1, demo INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS clients (
@@ -44,12 +89,7 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT NOT NULL, provider TEXT NOT NULL, payload TEXT, received_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (provider, event_id));
 `);
 
-if (!db.prepare("SELECT 1 FROM services LIMIT 1").get()) {
-  const ins = db.prepare("INSERT INTO services (name, default_price) VALUES (?, ?)");
-  for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]]) ins.run(n, p);
+if (!(await db.prepare("SELECT 1 FROM services LIMIT 1").get())) {
+  for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]])
+    await db.prepare("INSERT INTO services (name, default_price) VALUES (?, ?)").run(n, p);
 }
-
-export const tx = (fn) => {
-  db.exec("BEGIN");
-  try { const r = fn(); db.exec("COMMIT"); return r; } catch (e) { db.exec("ROLLBACK"); throw e; }
-};
