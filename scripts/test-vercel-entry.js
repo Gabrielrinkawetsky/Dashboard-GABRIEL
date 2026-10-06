@@ -13,6 +13,7 @@ const dir = mkdtempSync(path.join(tmpdir(), "dashboard-vercel-test-"));
 process.chdir(dir);
 Object.assign(process.env, { VERCEL: "1", NODE_ENV: "production", WEBHOOK_SECRET: "test-only-webhook-secret-0123456789" });
 delete process.env.TURSO_DATABASE_URL;
+process.env.ALLOW_LOCAL_DB = "1"; // o teste usa um banco local temporário; sem isso o servidor recusa subir na Vercel sem o Turso
 
 const { default: handler } = await import(pathToFileURL(path.join(project, "api/index.js")).href);
 assert.equal(typeof handler, "function", "api/index.js deve exportar uma função (req, res)");

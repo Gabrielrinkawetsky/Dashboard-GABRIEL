@@ -7,6 +7,9 @@ import { mkdirSync } from "node:fs";
 const remote = Boolean(process.env.TURSO_DATABASE_URL);
 // Remoto (Turso): cliente web, 100% JavaScript (funciona na Vercel sem binário nativo). Local: cliente com suporte a arquivo.
 const { createClient } = remote ? await import("@libsql/client/web") : await import("@libsql/client");
+// Na Vercel o disco é temporário: sem o banco da nuvem os dados se perderiam. Falha com uma mensagem clara.
+if (process.env.VERCEL && !remote && !process.env.ALLOW_LOCAL_DB)
+  throw new Error("Banco não configurado: conecte o Turso ao projeto na Vercel (variáveis TURSO_DATABASE_URL e TURSO_AUTH_TOKEN).");
 if (!remote) mkdirSync("data", { recursive: true });
 export const client = createClient({
   url: process.env.TURSO_DATABASE_URL || "file:data/app.db",
