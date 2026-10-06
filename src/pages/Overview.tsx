@@ -4,7 +4,7 @@ import { AlertCircle, CalendarClock, Plus } from "lucide-react";
 import { api } from "../api";
 import { useStore } from "../store";
 import { Badge, Card, Empty, PageHeader, Title } from "../ui";
-import { brl, clientLabel, dailyTasks, fmtDate, instPaid, metrics, monthlySeries } from "../lib";
+import { brl, clientLabel, dailyTasks, fmtDate, instPaid, metrics, monthlySeries, todayISO } from "../lib";
 import { ClientModal, Kpi, PaymentModal, ProjectModal, ProposalModal, type PageProps } from "./shared";
 
 const periodLabel: Record<string, string> = { mes: "no mês", "30d": "em 30 dias", "90d": "em 90 dias", ano: "no ano", tudo: "no total", custom: "no período" };
@@ -101,7 +101,7 @@ export default function Overview({ go }: PageProps) {
                     <td className="td">{i.label}</td>
                     <td className="td">{fmtDate(i.due_date)}</td>
                     <td className="td text-right font-medium">{brl(i.amount - instPaid(d, i.id))}</td>
-                    <td className="td">{i.due_date < new Date().toISOString().slice(0, 10) && <Badge tone="bad">Atrasada</Badge>}</td>
+                    <td className="td">{i.due_date < todayISO() &&<Badge tone="bad">Atrasada</Badge>}</td>
                   </tr>
                 ))}
               </tbody>

@@ -1,6 +1,7 @@
 import { db, tx } from "./db.js";
+import { ymd } from "./dates.js";
 
-const day = (offset) => { const d = new Date(); d.setDate(d.getDate() + offset); return d.toISOString().slice(0, 10); };
+const day = (offset) => { const d = new Date(); d.setDate(d.getDate() + offset); return ymd(d); };
 
 export function seedDemo() {
   if (db.prepare("SELECT 1 FROM clients WHERE demo=1").get()) return false;

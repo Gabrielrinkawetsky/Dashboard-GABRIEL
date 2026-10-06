@@ -1,6 +1,7 @@
 import express from "express";
 import { existsSync } from "node:fs";
 import { db, tx } from "./db.js";
+import { addMonths, today } from "./dates.js";
 import { generatedPassword, loginAllowed, makeToken, noteAttempt, readCookie, safeEqual, validToken } from "./auth.js";
 import { removeDemo, seedDemo } from "./demo.js";
 
@@ -8,7 +9,6 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 const PORT = Number(process.env.PORT ?? 3001);
 const STAGES = ["Briefing", "Aguardando materiais", "Design", "Desenvolvimento", "Revisão", "Entregue"];
-const today = () => new Date().toISOString().slice(0, 10);
 const fail = (res, code, error) => res.status(code).json({ error });
 const bad = (msg, code = 422) => Object.assign(new Error(msg), { code });
 
@@ -131,6 +131,7 @@ app.post("/api/proposals/:id/approve", (req, res) => {
   const parcelas = Math.max(1, Math.min(24, Math.round(Number(req.body?.parcelas ?? 1))));
   if (!(entrada >= 0) || entrada >= p.value) return fail(res, 400, "Entrada deve ser menor que o valor total");
   const first = String(req.body?.primeiro_vencimento || today()).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(first)) return fail(res, 400, "Data do primeiro vencimento inválida");
   try {
     const projectId = tx(() => {
       db.prepare("UPDATE proposals SET status='aprovada', decided_at=? WHERE id=?").run(today(), p.id);
@@ -144,10 +145,8 @@ app.post("/api/proposals/:id/approve", (req, res) => {
       const rest = p.value - entrada, base = Math.floor(rest / parcelas);
       if (entrada > 0) ins.run(p.id, pid, p.client_id, "Entrada", entrada, today());
       for (let i = 0; i < parcelas; i++) {
-        const d = new Date(first + "T12:00:00");
-        d.setMonth(d.getMonth() + i);
         const label = entrada > 0 || parcelas > 1 ? `Parcela ${i + 1}/${parcelas}` : "Pagamento único";
-        ins.run(p.id, pid, p.client_id, label, i === parcelas - 1 ? rest - base * (parcelas - 1) : base, d.toISOString().slice(0, 10));
+        ins.run(p.id, pid, p.client_id, label, i === parcelas - 1 ? rest - base * (parcelas - 1) : base, addMonths(first, i));
       }
       return pid;
     });

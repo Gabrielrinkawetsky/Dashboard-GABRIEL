@@ -3,7 +3,7 @@ import { Check, Pencil, Plus, Send, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { useStore } from "../store";
 import { Badge, Card, Confirm, DemoTag, Empty, Field, Modal, MoneyInput, PageHeader, statusTone } from "../ui";
-import { addDays, brl, clientLabel, effStatus, fmtDate, range, todayISO } from "../lib";
+import { addDays, brl, clientLabel, effStatus, fmtDate, localDay, range, todayISO } from "../lib";
 import type { Proposal } from "../types";
 import { ProposalModal, type PageProps } from "./shared";
 
@@ -56,7 +56,7 @@ export default function Proposals({ go }: PageProps) {
     if (filters.clientId && String(p.client_id) !== filters.clientId) return false;
     if (filters.service && p.service !== filters.service) return false;
     if (filters.status && effStatus(p) !== filters.status) return false;
-    const day = p.created_at.slice(0, 10);
+    const day = localDay(p.created_at);
     const open = ["rascunho", "enviada"].includes(effStatus(p));
     if (!open && (day < pf || day > pt)) return false; // propostas em aberto aparecem sempre
     const c = clients.get(p.client_id);

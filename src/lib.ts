@@ -1,15 +1,23 @@
 import type { Client, Data, Installment, Proposal, Recurring } from "./types";
 
 export const brl = (cents: number) => (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-export const fmtDate = (iso?: string | null) => (iso ? iso.slice(0, 10).split("-").reverse().join("/") : "—");
-export const todayISO = () => new Date().toISOString().slice(0, 10);
+// Data local em YYYY-MM-DD. Não use toISOString(): ele dá a data em UTC, que depois das 21h em Brasília já é o dia seguinte.
+const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// O CURRENT_TIMESTAMP do SQLite vem em UTC ("2026-10-06 00:30:00"); datas puras (YYYY-MM-DD) já são locais
+export const localDay = (s: string) => (s.length > 10 ? ymd(new Date(s.replace(" ", "T") + "Z")) : s);
+export const fmtDate = (iso?: string | null) => (iso ? localDay(iso).split("-").reverse().join("/") : "—");
+export const todayISO = () => ymd(new Date());
 export const addDays = (iso: string, n: number) => {
   const d = new Date(iso + "T12:00:00");
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  return ymd(d);
 };
+// Vírgula é o decimal (pt-BR). Sem vírgula, ponto com 1–2 dígitos no fim também é ("99.90", comum no celular);
+// qualquer outro ponto separa milhar ("1.500").
 export const toCents = (s: string) => {
-  const n = Number(s.replace(/\./g, "").replace(",", ".").replace(/[^\d.-]/g, ""));
+  let t = s.replace(/[^\d.,-]/g, "");
+  if (!t.includes(",")) t = t.replace(/\.(\d{1,2})$/, ",$1");
+  const n = Number(t.replace(/\./g, "").replace(",", "."));
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
 };
 export const fromCents = (c: number) => (c / 100).toFixed(2).replace(".", ",");
@@ -65,7 +73,7 @@ export function scope(d: Data, f: Filters) {
 export function metrics(d: Data, f: Filters) {
   const s = scope(d, f);
   const { from, to } = range(f);
-  const inP = (x?: string | null) => !!x && x.slice(0, 10) >= from && x.slice(0, 10) <= to;
+  const inP = (x?: string | null) => !!x && localDay(x) >= from && localDay(x) <= to;
   const today = todayISO();
   const net = (p: { type: string; amount: number }) => (p.type === "refund" ? -p.amount : p.amount);
 
@@ -113,7 +121,7 @@ export function monthlySeries(d: Data, f: Filters, months = 6) {
   for (let i = months - 1; i >= 0; i--) {
     const x = new Date(base);
     x.setMonth(x.getMonth() - i);
-    out.push({ key: x.toISOString().slice(0, 7), label: x.toLocaleDateString("pt-BR", { month: "short" }).replace(".", ""), recebido: 0, vendido: 0 });
+    out.push({ key: ymd(x).slice(0, 7), label: x.toLocaleDateString("pt-BR", { month: "short" }).replace(".", ""), recebido: 0, vendido: 0 });
   }
   const instIds = new Set(m.instScope.map((i) => i.id));
   for (const p of d.payments) {

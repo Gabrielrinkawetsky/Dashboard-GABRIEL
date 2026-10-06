@@ -73,13 +73,14 @@ export const Field = ({ label, children, hint }: { label: string; children: Reac
   </label>
 );
 
-/** Campo de valor em reais; controla o texto e entrega centavos. */
+/** Campo de valor em reais; controla o texto e entrega centavos. Ao sair do campo, mostra o valor como foi entendido (99.90 → 99,90). */
 export function MoneyInput({ cents, onChange, ...rest }: { cents: number; onChange: (c: number) => void } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "onChange" | "value">) {
   const [text, setText] = useState(cents ? fromCents(cents) : "");
   useEffect(() => { if (toCents(text) !== cents) setText(cents ? fromCents(cents) : ""); }, [cents]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <input {...rest} className="field" inputMode="decimal" placeholder="0,00" value={text}
-      onChange={(e) => { setText(e.target.value); onChange(toCents(e.target.value)); }} />
+      onChange={(e) => { setText(e.target.value); onChange(toCents(e.target.value)); }}
+      onBlur={() => setText(cents ? fromCents(cents) : "")} />
   );
 }
 
