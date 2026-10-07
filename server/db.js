@@ -2,36 +2,49 @@
 //   TURSO_DATABASE_URL  libsql://seu-banco.turso.io   (vazio = arquivo local file:data/app.db)
 //   TURSO_AUTH_TOKEN    token do banco (só no servidor)
 // A interface imita a anterior (prepare().get/all/run), agora assíncrona: use sempre "await".
+//
+// Se o banco não estiver disponível (na Vercel sem Turso, ou credenciais erradas) o servidor NÃO cai: ele sobe,
+// guarda a causa em dbState.problem e responde 503 com uma mensagem clara (ver server/index.js).
 import { mkdirSync } from "node:fs";
 
-const remote = Boolean(process.env.TURSO_DATABASE_URL);
-// Remoto (Turso): cliente web, 100% JavaScript (funciona na Vercel sem binário nativo). Local: cliente com suporte a arquivo.
-const { createClient } = remote ? await import("@libsql/client/web") : await import("@libsql/client");
-// Na Vercel o disco é temporário: sem o banco da nuvem os dados se perderiam. Falha com uma mensagem clara.
-if (process.env.VERCEL && !remote && !process.env.ALLOW_LOCAL_DB)
-  throw new Error("Banco não configurado: conecte o Turso ao projeto na Vercel (variáveis TURSO_DATABASE_URL e TURSO_AUTH_TOKEN).");
-if (!remote) mkdirSync("data", { recursive: true });
-export const client = createClient({
-  url: process.env.TURSO_DATABASE_URL || "file:data/app.db",
-  authToken: process.env.TURSO_AUTH_TOKEN,
-});
+export const dbState = { problem: null };
+export class DbNotConfigured extends Error {
+  constructor(message) { super(message); this.code = 503; }
+}
 
+const remote = Boolean(process.env.TURSO_DATABASE_URL);
+// Na Vercel o disco é temporário: sem o banco da nuvem os dados se perderiam.
+if (process.env.VERCEL && !remote && !process.env.ALLOW_LOCAL_DB)
+  dbState.problem = "Banco de dados não configurado: conecte o Turso ao projeto na Vercel (Storage → Turso) e faça um novo deploy.";
+
+export let client = null;
+if (!dbState.problem) {
+  // Remoto (Turso): cliente web, 100% JavaScript (funciona na Vercel sem binário nativo). Local: cliente com suporte a arquivo.
+  const { createClient } = remote ? await import("@libsql/client/web") : await import("@libsql/client");
+  if (!remote) mkdirSync("data", { recursive: true });
+  client = createClient({
+    url: process.env.TURSO_DATABASE_URL || "file:data/app.db",
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  });
+}
+
+const need = () => { if (dbState.problem) throw new DbNotConfigured(dbState.problem); };
 const plain = (rs, row) => Object.fromEntries(rs.columns.map((c, i) => [c, row[i]]));
 const norm = (args) => args.map((a) => (a === undefined ? null : a));
 
 /** Cria a interface (prepare/exec) sobre uma função que executa SQL — o cliente normal ou uma transação. */
 const wrap = (execute, executeMultiple) => ({
   prepare: (sql) => ({
-    get: async (...args) => { const rs = await execute({ sql, args: norm(args) }); return rs.rows[0] ? plain(rs, rs.rows[0]) : undefined; },
-    all: async (...args) => { const rs = await execute({ sql, args: norm(args) }); return rs.rows.map((r) => plain(rs, r)); },
-    run: async (...args) => { const rs = await execute({ sql, args: norm(args) }); return { changes: rs.rowsAffected, lastInsertRowid: Number(rs.lastInsertRowid ?? 0) }; },
+    get: async (...args) => { need(); const rs = await execute({ sql, args: norm(args) }); return rs.rows[0] ? plain(rs, rs.rows[0]) : undefined; },
+    all: async (...args) => { need(); const rs = await execute({ sql, args: norm(args) }); return rs.rows.map((r) => plain(rs, r)); },
+    run: async (...args) => { need(); const rs = await execute({ sql, args: norm(args) }); return { changes: rs.rowsAffected, lastInsertRowid: Number(rs.lastInsertRowid ?? 0) }; },
   }),
-  exec: (sql) => executeMultiple(sql),
+  exec: (sql) => { need(); return executeMultiple(sql); },
 });
 
 export const db = {
   ...wrap((s) => client.execute(s), (sql) => client.executeMultiple(sql)),
-  close: () => client.close(),
+  close: () => client?.close(),
 };
 
 /**
@@ -39,6 +52,7 @@ export const db = {
  * ("d") — dentro dela use sempre d.prepare(...), nunca db.prepare(...), senão a consulta sai da transação.
  */
 export async function tx(fn) {
+  need();
   const t = await client.transaction("write");
   try {
     const result = await fn(wrap((s) => t.execute(s), (sql) => t.executeMultiple(sql)));
@@ -53,8 +67,10 @@ export async function tx(fn) {
 }
 
 // Esquema. Todos os valores monetários são inteiros em centavos.
-if (!remote) await client.execute("PRAGMA foreign_keys = ON").catch(() => {});
-await client.executeMultiple(`
+if (!dbState.problem) {
+  try {
+    if (!remote) await client.execute("PRAGMA foreign_keys = ON").catch(() => {});
+    await client.executeMultiple(`
 CREATE TABLE IF NOT EXISTS services (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, default_price INTEGER DEFAULT 0, active INTEGER DEFAULT 1, demo INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS clients (
@@ -92,7 +108,12 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT NOT NULL, provider TEXT NOT NULL, payload TEXT, received_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (provider, event_id));
 `);
 
-if (!(await db.prepare("SELECT 1 FROM services LIMIT 1").get())) {
-  for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]])
-    await db.prepare("INSERT INTO services (name, default_price) VALUES (?, ?)").run(n, p);
+    if (!(await db.prepare("SELECT 1 FROM services LIMIT 1").get())) {
+      for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]])
+        await db.prepare("INSERT INTO services (name, default_price) VALUES (?, ?)").run(n, p);
+    }
+  } catch (e) {
+    dbState.problem = "Não foi possível conectar ao banco de dados. Confira TURSO_DATABASE_URL e TURSO_AUTH_TOKEN no projeto da Vercel.";
+    console.error("[db] falha ao iniciar o banco:", e?.message ?? e);
+  }
 }

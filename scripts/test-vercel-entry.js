@@ -14,7 +14,8 @@ const dir = mkdtempSync(path.join(tmpdir(), "dashboard-vercel-test-"));
 process.chdir(dir);
 Object.assign(process.env, { VERCEL: "1", NODE_ENV: "production", WEBHOOK_SECRET: "test-only-webhook-secret-0123456789" });
 delete process.env.TURSO_DATABASE_URL;
-process.env.ADMIN_INITIAL_PASSWORD = "senha-inicial-de-teste-123"; // cria o administrador na primeira execução
+const alias = process.argv[2] === "alias"; // alias: o nome usado no guia VERCEL.md
+process.env[alias ? "ADMIN_PASSWORD" : "ADMIN_INITIAL_PASSWORD"] = "senha-inicial-de-teste-123"; // cria o administrador na primeira execução
 process.env.ALLOW_LOCAL_DB = "1"; // o teste usa um banco local temporário; sem isso o servidor recusa subir na Vercel sem o Turso
 
 const { default: handler } = await import(new URL("../api/index.js", import.meta.url).href);

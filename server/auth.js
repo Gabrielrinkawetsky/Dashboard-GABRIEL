@@ -1,22 +1,29 @@
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { db, tx } from './db.js';
+import { db, dbState, tx } from './db.js';
 
-// Segredo do webhook. Em produção (Vercel) vem SEMPRE do ambiente: o sistema de arquivos é somente leitura e
-// gerar um segredo aleatório a cada execução faria cada instância ter um valor diferente.
-if (!process.env.WEBHOOK_SECRET) {
-  if (process.env.NODE_ENV === 'production' || process.env.VERCEL) throw new Error('Defina a variável de ambiente WEBHOOK_SECRET.');
+// Segredo do webhook. Em desenvolvimento é gerado e guardado no .env. Em produção (Vercel) vem SEMPRE do ambiente
+// (o disco é somente leitura); sem ele o webhook de pagamentos fica desligado, mas o resto do painel funciona.
+if (!process.env.WEBHOOK_SECRET && process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   const current = existsSync('.env') ? readFileSync('.env', 'utf8') : '';
   const saved = current.match(/^WEBHOOK_SECRET=(.*)$/m)?.[1].trim();
   process.env.WEBHOOK_SECRET = saved || crypto.randomBytes(32).toString('hex');
   if (!saved) appendFileSync('.env', `\nWEBHOOK_SECRET=${process.env.WEBHOOK_SECRET}\n`);
 }
-await db.exec(`
+const markDbProblem = (e) => {
+  dbState.problem = 'Não foi possível preparar o banco de dados. Confira TURSO_DATABASE_URL e TURSO_AUTH_TOKEN no projeto da Vercel.';
+  console.error('[auth] falha ao preparar as tabelas de acesso:', e?.message ?? e);
+};
+if (!dbState.problem) {
+  try {
+    await db.exec(`
 CREATE TABLE IF NOT EXISTS auth_users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES auth_users(id), expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
 `);
+  } catch (e) { markDbProblem(e); }
+}
 const scryptRaw = promisify(crypto.scrypt);
 // Cada scrypt usa ~128 MB: limita a 2 simultâneos para que várias tentativas de login em paralelo não esgotem a memória.
 let running = 0;
@@ -41,18 +48,24 @@ export const verifyPassword = async (password, encoded) => {
 };
 const dummyHash = await hashPassword(crypto.randomBytes(32).toString('hex'));
 
-// Primeira execução (ex.: Vercel, que não tem terminal): se NÃO existe nenhuma conta e ADMIN_INITIAL_PASSWORD está definida,
-// cria o administrador. Com qualquer conta existente isto não faz nada (nunca troca nem recria senha).
+// Primeira execução (ex.: Vercel, que não tem terminal): se NÃO existe nenhuma conta e ADMIN_INITIAL_PASSWORD
+// (ou ADMIN_PASSWORD, o nome usado no guia VERCEL.md) está definida, cria o administrador.
+// Com qualquer conta existente isto não faz nada (nunca troca nem recria senha).
 // Depois de entrar, troque a senha no painel e REMOVA a variável.
-const initialPassword = process.env.ADMIN_INITIAL_PASSWORD;
-if (initialPassword && !(await db.prepare('SELECT 1 FROM auth_users LIMIT 1').get())) {
-  if (initialPassword.length < 15 || initialPassword.length > 128) console.error('ADMIN_INITIAL_PASSWORD ignorada: use de 15 a 128 caracteres.');
-  else {
-    const name = (process.env.ADMIN_INITIAL_USERNAME || 'gabriel').trim().toLowerCase();
-    await db.prepare('INSERT OR IGNORE INTO auth_users (username,password_hash) VALUES (?,?)').run(name, await hashPassword(initialPassword));
-    console.log(`Administrador "${name}" criado a partir de ADMIN_INITIAL_PASSWORD. Troque a senha no painel e remova a variável.`);
-  }
+const initialPassword = process.env.ADMIN_INITIAL_PASSWORD || process.env.ADMIN_PASSWORD;
+if (!dbState.problem && initialPassword) {
+  try {
+    if (!(await db.prepare('SELECT 1 FROM auth_users LIMIT 1').get())) {
+      if (initialPassword.length < 15 || initialPassword.length > 128) console.error('Senha inicial do administrador ignorada: use de 15 a 128 caracteres.');
+      else {
+        const name = (process.env.ADMIN_INITIAL_USERNAME || 'gabriel').trim().toLowerCase();
+        await db.prepare('INSERT OR IGNORE INTO auth_users (username,password_hash) VALUES (?,?)').run(name, await hashPassword(initialPassword));
+        console.log(`Administrador "${name}" criado a partir da variável de ambiente da senha inicial. Troque a senha no painel e remova a variável.`);
+      }
+    }
+  } catch (e) { markDbProblem(e); }
 }
+
 export const authenticate = async (username, password) => {
   const user = await db.prepare('SELECT * FROM auth_users WHERE username=?').get(username);
   const valid = await verifyPassword(password, user?.password_hash ?? dummyHash);
@@ -66,6 +79,7 @@ export const createSession = async userId => {
 };
 export const readCookie = (req, name) => (req.headers.cookie ?? '').split(';').map(c => c.trim().split('=')).find(([k]) => k === name)?.[1];
 export const getSession = async req => {
+  if (dbState.problem) return null;
   const token = readCookie(req, 'session');
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
   return (await db.prepare('SELECT u.id, u.username FROM auth_sessions s JOIN auth_users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires>?').get(digest(token), Date.now())) ?? null;

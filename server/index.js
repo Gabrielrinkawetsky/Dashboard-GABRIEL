@@ -1,6 +1,6 @@
 import express from "express";
 import { existsSync } from "node:fs";
-import { db, tx } from "./db.js";
+import { db, dbState, tx } from "./db.js";
 import { addMonths, today } from "./dates.js";
 import { authenticate, changePassword, cookie, createSession, getSession, loginAllowed, revokeSession, safeEqual } from "./auth.js";
 import { removeDemo, seedDemo } from "./demo.js";
@@ -31,6 +31,23 @@ app.use((req, res, next) => {
 });
 app.use("/api/webhooks", express.json({ limit: "64kb" })); // webhook: corpo pequeno
 app.use(express.json({ limit: "1mb" }));
+
+// Estado do banco, sem segredos: só "sim/não". Útil para ver na hora por que o login não funciona.
+app.get("/api/health", async (_req, res) => {
+  if (dbState.problem) return res.status(503).json({ ok: false, database: false, reason: dbState.problem });
+  try {
+    const row = await db.prepare("SELECT count(*) AS n FROM auth_users").get();
+    res.json({ ok: true, database: true, adminCreated: Number(row.n) > 0, webhookEnabled: Boolean(process.env.WEBHOOK_SECRET) });
+  } catch (e) {
+    console.error("[health] falha ao consultar o banco:", e.message);
+    res.status(503).json({ ok: false, database: false, reason: "O banco de dados não respondeu." });
+  }
+});
+// Sem banco pronto o servidor não cai: responde 503 com a causa (a tela de login mostra esta mensagem).
+app.use("/api", (req, res, next) => {
+  if (!dbState.problem || req.path === "/session") return next();
+  res.status(503).json({ error: dbState.problem });
+});
 const PORT = Number(process.env.PORT ?? 3001);
 const STAGES = ["Briefing", "Aguardando materiais", "Design", "Desenvolvimento", "Revisão", "Entregue"];
 const fail = (res, code, error) => res.status(code).json({ error });
@@ -57,6 +74,7 @@ const ID_RE = /^[A-Za-z0-9_.-]{1,100}$/; // sem ":" (separador do id de estorno)
 const PROVIDER_RE = /^[a-z0-9_-]{1,40}$/;
 
 app.post("/api/webhooks/payments", async (req, res) => {
+  if (!process.env.WEBHOOK_SECRET) return fail(res, 503, "Webhook desligado: defina WEBHOOK_SECRET para ativá-lo.");
   if (hookBlocked(req.ip)) { res.setHeader("Retry-After", "60"); return fail(res, 429, "Muitas tentativas"); }
   const secret = req.get("x-webhook-secret");
   if (!secret || !safeEqual(secret, process.env.WEBHOOK_SECRET)) { hookFail(req.ip); return fail(res, 401, "Segredo inválido"); }

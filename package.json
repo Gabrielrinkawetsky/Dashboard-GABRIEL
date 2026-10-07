@@ -12,7 +12,9 @@
     "auth:setup": "node --env-file-if-exists=.env scripts/setup-admin.js",
     "test:auth": "node --disable-warning=ExperimentalWarning scripts/test-auth.js",
     "test:security": "node --disable-warning=ExperimentalWarning scripts/test-security.js",
-    "test:vercel": "node --disable-warning=ExperimentalWarning scripts/test-vercel-entry.js"
+    "test:vercel": "node --disable-warning=ExperimentalWarning scripts/test-vercel-entry.js && node --disable-warning=ExperimentalWarning scripts/test-vercel-entry.js alias",
+    "auth:reset": "node --env-file-if-exists=.env scripts/reset-admin.js",
+    "test:vercel-nodb": "node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js && node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js bad-url"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
