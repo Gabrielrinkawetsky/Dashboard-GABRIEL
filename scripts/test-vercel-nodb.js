@@ -7,6 +7,7 @@ import http from "node:http";
 const mode = process.argv[2] ?? "missing";
 Object.assign(process.env, { VERCEL: "1", NODE_ENV: "production" });
 for (const k of ["WEBHOOK_SECRET", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "ALLOW_LOCAL_DB", "ADMIN_INITIAL_PASSWORD", "ADMIN_PASSWORD"]) delete process.env[k];
+if (mode === "prefixed") Object.assign(process.env, { ARMAZENAR_URL: "libsql://teste-inexistente-org.aws-us-east-1.turso.io", ARMAZENAR_AUTH_TOKEN: "token-falso" });
 if (mode === "bad-url") Object.assign(process.env, { TURSO_DATABASE_URL: "libsql://nao-existe-teste.invalid", TURSO_AUTH_TOKEN: "token-falso" });
 
 const { default: handler } = await import(new URL("../api/index.js", import.meta.url).href);
@@ -28,7 +29,7 @@ try {
 
   const login = await json("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "gabriel", password: "qualquer-senha-123" }) });
   assert.equal(login.status, 503, "login sem banco deve explicar, não dar erro genérico");
-  assert.match(login.body.error, mode === "bad-url" ? /conectar ao banco|preparar o banco/i : /Turso/);
+  assert.match(login.body.error, mode === "missing" ? /Turso/ : /conectar ao banco|preparar o banco/i, "com variáveis presentes (mesmo com prefixo) deve tentar conectar, não dizer \"não configurado\"");
   assert.equal(login.headers.get("set-cookie"), null, "não pode criar sessão");
 
   assert.equal((await json("/api/data")).status, 503);

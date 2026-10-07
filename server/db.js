@@ -12,7 +12,20 @@ export class DbNotConfigured extends Error {
   constructor(message) { super(message); this.code = 503; }
 }
 
-const remote = Boolean(process.env.TURSO_DATABASE_URL);
+// Procura o banco Turso. Nome padrão: TURSO_DATABASE_URL + TURSO_AUTH_TOKEN. A integração da Vercel permite um
+// "prefixo personalizado" (ex.: ARMAZENAR_URL + ARMAZENAR_AUTH_TOKEN), então também aceitamos qualquer variável
+// terminada em URL cujo valor seja um endereço *.turso.io, com o token de mesmo prefixo.
+const findTurso = () => {
+  const env = process.env;
+  if (env.TURSO_DATABASE_URL) return { url: env.TURSO_DATABASE_URL, token: env.TURSO_AUTH_TOKEN };
+  const urlKey = Object.keys(env).find((k) => /URL$/.test(k) && /^(libsql|https?|wss?):\/\/[^\s]*turso\.io/i.test(env[k] ?? ""));
+  if (!urlKey) return null;
+  const prefix = urlKey.replace(/(DATABASE_)?URL$/, "");
+  const tokenKey = [prefix + "AUTH_TOKEN", ...Object.keys(env).filter((k) => /AUTH_TOKEN$/.test(k))].find((k) => env[k]);
+  return { url: env[urlKey], token: tokenKey ? env[tokenKey] : undefined };
+};
+const turso = findTurso();
+const remote = Boolean(turso);
 // Na Vercel o disco é temporário: sem o banco da nuvem os dados se perderiam.
 if (process.env.VERCEL && !remote && !process.env.ALLOW_LOCAL_DB)
   dbState.problem = "Banco de dados não configurado: conecte o Turso ao projeto na Vercel (Storage → Turso) e faça um novo deploy.";
@@ -23,8 +36,8 @@ if (!dbState.problem) {
   const { createClient } = remote ? await import("@libsql/client/web") : await import("@libsql/client");
   if (!remote) mkdirSync("data", { recursive: true });
   client = createClient({
-    url: process.env.TURSO_DATABASE_URL || "file:data/app.db",
-    authToken: process.env.TURSO_AUTH_TOKEN,
+    url: turso?.url || "file:data/app.db",
+    authToken: turso?.token,
   });
 }
 
