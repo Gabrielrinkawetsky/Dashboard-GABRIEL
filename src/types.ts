@@ -15,3 +15,14 @@ export type Data = {
   settings: Record<string, string>; integration: { webhookConfigured: boolean; providerConnected: boolean };
 };
 export const STAGES = ["Briefing", "Aguardando materiais", "Design", "Desenvolvimento", "Revisão", "Entregue"] as const;
+
+export type Opportunity = {
+  id: number; name: string; company: string | null; email: string | null; phone: string | null; source: string | null; service: string | null;
+  value: number; stage: string; next_contact: string | null; owner: string | null; notes: string | null; lost_reason: string | null;
+  client_id: number | null; proposal_id: number | null; created_at: string; updated_at: string; closed_at: string | null; demo: number;
+};
+export type OppDetail = Opportunity & { events: { id: number; at: string; text: string }[]; client: { id: number; name: string; company: string | null } | null; proposal: { id: number; status: string; value: number; service: string } | null };
+export type Paged<T> = { items: T[]; total: number; page: number; pageSize: number; pages: number; sort: string; dir: "asc" | "desc" };
+export type Board = { stages: { stage: string; total: number; value: number; items: Opportunity[] }[]; won: { total: number; value: number }; lost: { total: number; value: number }; sinceDays: number };
+export const OPP_STAGES = ["Novo lead", "Contato iniciado", "Reunião/briefing", "Proposta enviada", "Negociação", "Ganho", "Perdido"] as const;
+export const OPP_SOURCES = ["Formulário do site", "Indicação", "Instagram", "WhatsApp", "Google", "LinkedIn", "Evento", "Outro"] as const;

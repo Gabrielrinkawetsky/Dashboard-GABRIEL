@@ -58,6 +58,21 @@ export async function seedDemo() {
     await rec.run(ids[0], "Hospedagem Doce Mel", "Hospedagem", 6000, "mensal", "ativo", day(8));
     await rec.run(ids[1], "Suporte RT Esportes", "Suporte", 15000, "mensal", "ativo", day(14));
     await rec.run(ids[3], "Manutenção anual", "Manutenção", 120000, "anual", "pausado", day(90));
+
+    const opp = d.prepare("INSERT INTO opportunities (name, company, email, phone, source, service, value, stage, next_contact, owner, notes, lost_reason, created_at, updated_at, closed_at, demo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)");
+    const oev = d.prepare("INSERT INTO opportunity_events (opportunity_id, text) VALUES (?,?)");
+    for (const [name, company, mail, phone, source, service, value, stage, next, notes, lost, age] of [
+      ["Fernanda Lopes", "Ateliê Lopes", "fernanda@exemplo.com", "(11) 91111-0001", "Instagram", "Landing page", 150000, "Novo lead", 0, "Quer vender cursos online.", null, 1],
+      ["Marcos Vieira", "Vieira Calçados", "marcos@exemplo.com", "(21) 92222-0002", "Indicação", "E-commerce", 480000, "Contato iniciado", 2, "Já vende em marketplace; quer loja própria.", null, 5],
+      ["Aline Rocha", "Rocha Odontologia", "aline@exemplo.com", "(31) 93333-0003", "Formulário do site", "Site institucional", 250000, "Reunião/briefing", 1, "Briefing marcado.", null, 8],
+      ["Bruno Teles", "Teles Fitness", "bruno@exemplo.com", "(41) 94444-0004", "Google", "Landing page", 180000, "Proposta enviada", -2, "Aguardando resposta da proposta.", null, 12],
+      ["Camila Duarte", "Duarte Moda", "camila@exemplo.com", "(51) 95555-0005", "WhatsApp", "E-commerce", 520000, "Negociação", 3, "Pediu desconto à vista.", null, 15],
+      ["Diego Matos", "Matos Eventos", "diego@exemplo.com", "(61) 96666-0006", "LinkedIn", "Site institucional", 220000, "Perdido", null, "Escolheu outra agência.", "Preço acima do orçamento", 30],
+    ]) {
+      const id = Number((await opp.run(name, company, mail, phone, source, service, value, stage, next === null ? null : day(next), "Gabriel Ribeiro Silva", notes, lost, day(-age), day(-age), stage === "Perdido" ? day(-age + 5) : null)).lastInsertRowid);
+      await oev.run(id, `Oportunidade criada (${source}) — exemplo.`);
+      if (stage !== "Novo lead") await oev.run(id, `Etapa: Novo lead → ${stage}.`);
+    }
   });
   return true;
 }
@@ -66,7 +81,9 @@ export async function removeDemo() {
   // Remove tudo que pertence a clientes de exemplo (inclui projetos e parcelas gerados ao aprovar propostas de exemplo)
   const demoClients = "(SELECT id FROM clients WHERE demo=1)";
   await tx(async (d) => {
-    await d.exec(`DELETE FROM payments WHERE demo=1 OR client_id IN ${demoClients};
+    await d.exec(`DELETE FROM opportunity_events WHERE opportunity_id IN (SELECT id FROM opportunities WHERE demo=1 OR client_id IN ${demoClients});
+DELETE FROM opportunities WHERE demo=1 OR client_id IN ${demoClients};
+DELETE FROM payments WHERE demo=1 OR client_id IN ${demoClients};
 DELETE FROM expenses WHERE demo=1 OR project_id IN (SELECT id FROM projects WHERE client_id IN ${demoClients});
 DELETE FROM installments WHERE demo=1 OR client_id IN ${demoClients};
 DELETE FROM recurring WHERE demo=1 OR client_id IN ${demoClients};

@@ -14,7 +14,8 @@
     "test:security": "node --disable-warning=ExperimentalWarning scripts/test-security.js",
     "test:vercel": "node --disable-warning=ExperimentalWarning scripts/test-vercel-entry.js && node --disable-warning=ExperimentalWarning scripts/test-vercel-entry.js alias",
     "auth:reset": "node --env-file-if-exists=.env scripts/reset-admin.js",
-    "test:vercel-nodb": "node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js && node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js bad-url && node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js prefixed"
+    "test:vercel-nodb": "node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js && node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js bad-url && node --disable-warning=ExperimentalWarning scripts/test-vercel-nodb.js prefixed",
+    "test:funnel": "node --disable-warning=ExperimentalWarning scripts/test-funnel.js"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

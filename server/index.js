@@ -4,6 +4,7 @@ import { db, dbState, tx } from "./db.js";
 import { addMonths, today } from "./dates.js";
 import { authenticate, changePassword, cookie, createSession, getSession, loginAllowed, revokeSession, safeEqual } from "./auth.js";
 import { removeDemo, seedDemo } from "./demo.js";
+import { leadRouter, opportunitiesRouter, originList } from "./funnel.js";
 import { Invalid, bool01, checklist, date, email, int, isDate, isPlainObject, money, oneOf, text } from "./validate.js";
 
 const app = express();
@@ -18,7 +19,7 @@ app.use((req, res, next) => {
   res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
   if (process.env.NODE_ENV === "production") res.setHeader("Strict-Transport-Security", "max-age=31536000");
   if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store");
-  if (req.path.startsWith("/api") && !["GET", "HEAD", "OPTIONS"].includes(req.method) && req.path !== "/api/webhooks/payments") {
+  if (req.path.startsWith("/api") && !["GET", "HEAD", "OPTIONS"].includes(req.method) && req.path !== "/api/webhooks/payments" && req.path !== "/api/public/lead") {
     if (!req.is("application/json")) return res.status(415).json({ error: "Envie JSON" });
     if (req.get("sec-fetch-site") === "cross-site") return res.status(403).json({ error: "Origem não autorizada" });
     const origin = req.get("origin");
@@ -145,12 +146,15 @@ app.get("/api/session", async (req, res) => {
   const user = await getSession(req);
   res.json({ authenticated: Boolean(user), username: user?.username });
 });
+// Rotas públicas (sem login): marca da empresa e captura de leads. Têm validação, limite de envios e política de origem próprias.
+app.use("/api/public", leadRouter);
 app.use("/api", async (req, res, next) => {
   const user = await getSession(req);
   if (!user) return fail(res, 401, "Não autenticado");
   req.authUser = user;
   next();
 });
+app.use("/api/opportunities", opportunitiesRouter); // funil de vendas (exige sessão: está depois do guarda acima)
 app.post("/api/change-password", async (req, res) => {
   const { currentPassword, newPassword } = req.body ?? {};
   if (typeof currentPassword !== "string" || currentPassword.length > 128 || typeof newPassword !== "string" || newPassword.length < 15 || newPassword.length > 128) return fail(res, 400, "A nova senha deve ter entre 15 e 128 caracteres");
@@ -234,7 +238,7 @@ app.get("/api/webhook-secret", (_req, res) => res.json({ secret: process.env.WEB
 app.put("/api/settings", async (req, res) => {
   try {
     if (!isPlainObject(req.body)) throw new Invalid("Corpo JSON inválido");
-    const rules = { company_name: (v) => text(v, "empresa", 120), owner_name: (v) => text(v, "responsável", 120), email: (v) => email(v), phone: (v) => text(v, "telefone", 40) };
+    const rules = { company_name: (v) => text(v, "empresa", 120), owner_name: (v) => text(v, "responsável", 120), email: (v) => email(v), phone: (v) => text(v, "telefone", 40), lead_allowed_origins: (v) => originList(v) };
     const values = Object.entries(rules).filter(([k]) => Object.hasOwn(req.body, k)).map(([k, parse]) => [k, parse(req.body[k]) ?? ""]);
     await tx(async (d) => {
       for (const [k, v] of values) await d.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(k, v);

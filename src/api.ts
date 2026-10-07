@@ -17,6 +17,7 @@ export const api = {
   changePassword: (currentPassword: string, newPassword: string) => call("POST", "/api/change-password", { currentPassword, newPassword }),
   logout: () => call("POST", "/api/logout"),
   data: () => call<Data>("GET", "/api/data"),
+  get: <T>(url: string) => call<T>("GET", url.startsWith("/") ? url : `/api/${url}`),
   create: (t: string, b: unknown) => call<{ id: number }>("POST", `/api/${t}`, b),
   update: (t: string, id: number, b: unknown) => call("PATCH", `/api/${t}/${id}`, b),
   remove: (t: string, id: number) => call("DELETE", `/api/${t}/${id}`),

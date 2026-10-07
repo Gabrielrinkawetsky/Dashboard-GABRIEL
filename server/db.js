@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS recurring (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT NOT NULL, provider TEXT NOT NULL, payload TEXT, received_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (provider, event_id));
+CREATE TABLE IF NOT EXISTS opportunities (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, company TEXT, email TEXT, phone TEXT, source TEXT, service TEXT,
+  value INTEGER NOT NULL DEFAULT 0, stage TEXT NOT NULL DEFAULT 'Novo lead', next_contact TEXT, owner TEXT, notes TEXT, lost_reason TEXT,
+  client_id INTEGER REFERENCES clients(id), proposal_id INTEGER REFERENCES proposals(id),
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, closed_at TEXT, demo INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS opportunities_stage ON opportunities(stage);
+CREATE INDEX IF NOT EXISTS opportunities_email ON opportunities(email);
+CREATE INDEX IF NOT EXISTS opportunities_next_contact ON opportunities(next_contact);
+CREATE TABLE IF NOT EXISTS opportunity_events (
+  id INTEGER PRIMARY KEY, opportunity_id INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  at TEXT DEFAULT CURRENT_TIMESTAMP, text TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS opportunity_events_opp ON opportunity_events(opportunity_id);
 `);
 
     if (!(await db.prepare("SELECT 1 FROM services LIMIT 1").get())) {
