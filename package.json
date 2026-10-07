@@ -15,6 +15,7 @@
     "test:security": "node --disable-warning=ExperimentalWarning scripts/test-security.js"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "express": "^5.2.1",
     "lucide-react": "^1.52.0",
     "react": "^19.3.0",

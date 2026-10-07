@@ -29,13 +29,13 @@ const ask = label => new Promise((resolve, reject) => {
 });
 
 try {
-  const user = db.prepare('SELECT id, username FROM auth_users ORDER BY id LIMIT 1').get();
+  const user = await db.prepare('SELECT id, username FROM auth_users ORDER BY id LIMIT 1').get();
   if (!user) throw new Error('Nenhuma conta existe. Rode npm run auth:setup.');
   const password = await ask(`Nova senha para ${user.username}: `);
   if (password.length < 15 || password.length > 128) throw new Error('A nova senha deve ter entre 15 e 128 caracteres.');
   if (process.stdin.isTTY && await ask('Confirme a nova senha: ') !== password) throw new Error('As senhas não coincidem.');
   await changePassword(user.id, password);
-  db.prepare('DELETE FROM auth_attempts WHERE key=?').run(`user:${user.username}`);
+  await db.prepare('DELETE FROM auth_attempts WHERE key=?').run(`user:${user.username}`);
   console.log(`Senha de ${user.username} redefinida. Todas as sessões foram encerradas.`);
 } catch (e) {
   console.error(e.message);

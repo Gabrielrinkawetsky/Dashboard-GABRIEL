@@ -1,12 +1,52 @@
-import { DatabaseSync } from "node:sqlite";
+import { createClient as createRemote } from "@libsql/client/web";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync } from "node:fs";
 
-mkdirSync("data", { recursive: true });
-export const db = new DatabaseSync("data/app.db");
-db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+// Produção (Vercel): banco Turso via TURSO_DATABASE_URL + TURSO_AUTH_TOKEN. Sem elas: arquivo local data/app.db.
+// O cliente remoto é só HTTP (sem módulo nativo); o de arquivo só é carregado quando usado.
+const url = process.env.TURSO_DATABASE_URL || "file:data/app.db";
+if (url.startsWith("file:")) mkdirSync("data", { recursive: true });
+const createClient = url.startsWith("file:") ? (await import("@libsql/client")).createClient : createRemote;
+const client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN || undefined, timeout: 5000 });
+
+// Dentro de tx(), toda consulta vai para a transação aberta (sem precisar passá-la adiante).
+const current = new AsyncLocalStorage();
+const execute = async (sql, args) => {
+  const r = await (current.getStore() ?? client).execute({ sql, args: args.map((a) => (a === undefined ? null : a)) });
+  return { rows: r.rows.map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]]))), changes: r.rowsAffected, lastInsertRowid: r.lastInsertRowid === undefined ? undefined : Number(r.lastInsertRowid) };
+};
+
+// Mesma forma do node:sqlite (prepare().get/all/run, exec), mas assíncrona.
+export const db = {
+  prepare: (sql) => ({
+    get: async (...args) => (await execute(sql, args)).rows[0],
+    all: async (...args) => (await execute(sql, args)).rows,
+    run: async (...args) => { const r = await execute(sql, args); return { changes: r.changes, lastInsertRowid: r.lastInsertRowid }; },
+  }),
+  exec: (sql) => (current.getStore() ?? client).executeMultiple(sql),
+  close: () => client.close(),
+};
+
+/** Transação de escrita: tudo ou nada, e serializada com as outras gravações. */
+export const tx = async (fn) => {
+  if (current.getStore()) return fn();
+  const t = await client.transaction("write");
+  try {
+    const r = await current.run(t, fn);
+    await t.commit();
+    return r;
+  } catch (e) {
+    await t.rollback().catch(() => {});
+    throw e;
+  } finally {
+    t.close();
+  }
+};
+
+if (url.startsWith("file:")) await db.exec("PRAGMA journal_mode = WAL;");
 
 // Todos os valores monetários são inteiros em centavos.
-db.exec(`
+await db.exec(`
 CREATE TABLE IF NOT EXISTS services (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, default_price INTEGER DEFAULT 0, active INTEGER DEFAULT 1, demo INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS clients (
@@ -42,14 +82,13 @@ CREATE TABLE IF NOT EXISTS recurring (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT NOT NULL, provider TEXT NOT NULL, payload TEXT, received_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (provider, event_id));
+CREATE TABLE IF NOT EXISTS auth_users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES auth_users(id), expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
 `);
 
-if (!db.prepare("SELECT 1 FROM services LIMIT 1").get()) {
+await tx(async () => {
+  if (await db.prepare("SELECT 1 FROM services LIMIT 1").get()) return;
   const ins = db.prepare("INSERT INTO services (name, default_price) VALUES (?, ?)");
-  for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]]) ins.run(n, p);
-}
-
-export const tx = (fn) => {
-  db.exec("BEGIN");
-  try { const r = fn(); db.exec("COMMIT"); return r; } catch (e) { db.exec("ROLLBACK"); throw e; }
-};
+  for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]]) await ins.run(n, p);
+});

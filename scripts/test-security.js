@@ -15,7 +15,7 @@ process.env.WEBHOOK_SECRET = WEBHOOK;
 const { db } = await import("../server/db.js");
 const { hashPassword } = await import("../server/auth.js");
 const PASSWORD = "test-only-password-123456";
-db.prepare("INSERT INTO auth_users(username,password_hash) VALUES (?,?)").run("tester", await hashPassword(PASSWORD));
+await db.prepare("INSERT INTO auth_users(username,password_hash) VALUES (?,?)").run("tester", await hashPassword(PASSWORD));
 
 const children = [];
 async function startServer(env = {}) {
