@@ -9,7 +9,7 @@ As rotas /api exigem sessão válida, exceto login, logout, consulta de sessão 
 
 Para desenvolvimento, execute `npm run dev` e acesse http://localhost:5180. Para produção, execute o build e sirva com NODE_ENV=production, HTTPS e APP_ORIGIN definido para a origem exata do painel (por exemplo, https://painel.suaempresa.com). A configuração de produção ativa cookies Secure e HSTS. A infraestrutura deve redirecionar HTTP para HTTPS. Não publique .env, data/ ou backups. Em produção, somente o build e a API devem ser expostos; não use o servidor de desenvolvimento Vite.
 
-Esta implementação usa um único administrador e banco SQLite persistente. A recuperação de acesso requer manutenção pelo operador do servidor; não há fluxo público de recuperação por e-mail. A proteção de hospedagem, backups, domínio, TLS e acesso ao computador depende da configuração operacional. Esta mudança não é uma auditoria de todo o dashboard.
+Esta implementação usa um único administrador e banco SQLite persistente. A recuperação de acesso requer manutenção pelo operador do servidor; não há fluxo público de recuperação por e-mail. No servidor, `npm run auth:reset` pede a nova senha sem exibi-la (15 a 128 caracteres), grava apenas o hash, encerra todas as sessões e libera o bloqueio de tentativas do usuário. A proteção de hospedagem, backups, domínio, TLS e acesso ao computador depende da configuração operacional. Esta mudança não é uma auditoria de todo o dashboard.
 
 Verificação: `npm run build` e `npm run test:auth`. Os testes usam um banco temporário isolado e verificam APIs privadas, credenciais inválidas, origem externa, logout, expiração, alteração de senha, revogação de sessões e limite de tentativas.
 
