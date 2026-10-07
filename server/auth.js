@@ -40,6 +40,19 @@ export const verifyPassword = async (password, encoded) => {
   return crypto.timingSafeEqual(result, Buffer.from(hash, 'hex'));
 };
 const dummyHash = await hashPassword(crypto.randomBytes(32).toString('hex'));
+
+// Primeira execução (ex.: Vercel, que não tem terminal): se NÃO existe nenhuma conta e ADMIN_INITIAL_PASSWORD está definida,
+// cria o administrador. Com qualquer conta existente isto não faz nada (nunca troca nem recria senha).
+// Depois de entrar, troque a senha no painel e REMOVA a variável.
+const initialPassword = process.env.ADMIN_INITIAL_PASSWORD;
+if (initialPassword && !(await db.prepare('SELECT 1 FROM auth_users LIMIT 1').get())) {
+  if (initialPassword.length < 15 || initialPassword.length > 128) console.error('ADMIN_INITIAL_PASSWORD ignorada: use de 15 a 128 caracteres.');
+  else {
+    const name = (process.env.ADMIN_INITIAL_USERNAME || 'gabriel').trim().toLowerCase();
+    await db.prepare('INSERT OR IGNORE INTO auth_users (username,password_hash) VALUES (?,?)').run(name, await hashPassword(initialPassword));
+    console.log(`Administrador "${name}" criado a partir de ADMIN_INITIAL_PASSWORD. Troque a senha no painel e remova a variável.`);
+  }
+}
 export const authenticate = async (username, password) => {
   const user = await db.prepare('SELECT * FROM auth_users WHERE username=?').get(username);
   const valid = await verifyPassword(password, user?.password_hash ?? dummyHash);
