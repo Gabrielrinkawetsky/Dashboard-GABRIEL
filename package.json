@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.js",
-    "dev:api": "node --watch --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js",
+    "dev:api": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js",
     "dev:web": "vite --port 5180 --strictPort",
     "build": "tsc -b && vite build",
     "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js",
