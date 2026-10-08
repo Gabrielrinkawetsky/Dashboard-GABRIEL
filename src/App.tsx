@@ -149,7 +149,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           <div className="hidden text-sm text-slate-400 lg:block">Olá, <span className="font-medium text-slate-100">{owner.split(" ")[0]}</span> 👋</div>
           <div className="flex items-center gap-3">
             <div className="text-right"><p className="text-sm font-medium leading-tight">{owner}</p><p className="text-xs text-slate-500">Administrador</p></div>
-            <img src="/avatar.jpeg" alt={owner} width={40} height={40} className="h-10 w-10 rounded-full object-cover ring-2 ring-violet/60" style={{ objectPosition: "58% 28%" }} />
+            <img src="/avatar.jpeg" alt={owner} width={40} height={40} className="h-10 w-10 rounded-full object-cover ring-2 ring-violet/60" style={{ objectPosition: "50% 30%" }} />
             <button onClick={onLogout} className="rounded-lg p-2 text-slate-400 hover:bg-white/10 lg:hidden" aria-label="Sair"><LogOut className="h-4 w-4" /></button>
           </div>
         </header>
