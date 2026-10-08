@@ -2,6 +2,8 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { api } from "../api";
 import { useStore } from "../store";
 import { Field, Modal, MoneyInput } from "../ui";
+import { useApi } from "../useApi";
+import { fromTemplate, type Template } from "../templates";
 import { brl, clientLabel, fmtDate, instPaid, todayISO } from "../lib";
 import type { Client, Proposal } from "../types";
 
@@ -65,6 +67,7 @@ export function ProposalModal({ proposal, onClose }: { proposal?: Proposal; onCl
     valid_until: proposal?.valid_until ?? "", status: proposal?.status ?? "rascunho",
   });
   const [busy, setBusy] = useState(false);
+  const { data: templates } = useApi<Template[]>(proposal ? null : "templates");
   if (!data!.clients.length) return (
     <Modal title="Nova proposta" onClose={onClose}>
       <p className="text-sm text-slate-300">Cadastre um cliente antes de criar uma proposta.</p>
@@ -87,6 +90,14 @@ export function ProposalModal({ proposal, onClose }: { proposal?: Proposal; onCl
             {data!.clients.map((c) => <option key={c.id} value={c.id}>{clientLabel(c)}</option>)}
           </select>
         </Field>
+        {!proposal && !!templates?.some((t) => t.active) && (
+          <Field label="Modelo" hint="Preenche serviço, valor, escopo, prazo e validade. Você pode ajustar tudo depois.">
+            <select className="field" defaultValue="" onChange={(e) => { const t = templates.find((x) => String(x.id) === e.target.value); if (t) setF({ ...f, ...fromTemplate(t) }); }}>
+              <option value="">Em branco</option>
+              {templates.filter((t) => t.active).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Serviço *">
             <select className="field" value={f.service} onChange={(e) => {

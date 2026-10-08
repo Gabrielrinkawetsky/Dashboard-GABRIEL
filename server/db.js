@@ -131,6 +131,10 @@ CREATE TABLE IF NOT EXISTS opportunity_events (
   id INTEGER PRIMARY KEY, opportunity_id INTEGER NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
   at TEXT DEFAULT CURRENT_TIMESTAMP, text TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS opportunity_events_opp ON opportunity_events(opportunity_id);
+CREATE TABLE IF NOT EXISTS proposal_templates (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, service TEXT NOT NULL, scope TEXT, deliverables TEXT, exclusions TEXT,
+  revisions INTEGER NOT NULL DEFAULT 2, deadline_days INTEGER NOT NULL DEFAULT 15, validity_days INTEGER NOT NULL DEFAULT 7,
+  payment_terms TEXT, price INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 `);
 
     if (!(await db.prepare("SELECT 1 FROM services LIMIT 1").get())) {

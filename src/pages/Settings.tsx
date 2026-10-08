@@ -1,4 +1,5 @@
 import PasswordSettings from "../PasswordSettings";
+import TemplatesCard from "./TemplatesCard";
 import { useState, type FormEvent } from "react";
 import { Copy, Eye, EyeOff, Plus } from "lucide-react";
 import { api } from "../api";
@@ -41,6 +42,7 @@ export default function SettingsPage(_: PageProps) {
       <PageHeader title="Configurações" />
       <div className="grid gap-4 xl:grid-cols-2 [&>*]:min-w-0">
         <PasswordSettings />
+        <TemplatesCard />
         <Card>
           <Title>Captura de leads</Title>
           <p className="mb-3 text-sm text-slate-400">Divulgue este endereço (bio do Instagram, WhatsApp, e-mail). Quem preencher entra sozinho no Funil como "Novo lead", sem duplicar contatos.</p>

@@ -6,6 +6,7 @@ import { authenticate, changePassword, cookie, createSession, getSession, loginA
 import { removeDemo, seedDemo } from "./demo.js";
 import { leadRouter, opportunitiesRouter, originList } from "./funnel.js";
 import { summaryRouter } from "./summary.js";
+import { templatesRouter } from "./templates.js";
 import { Invalid, bool01, checklist, date, email, int, isDate, isPlainObject, money, oneOf, text } from "./validate.js";
 
 const app = express();
@@ -155,6 +156,7 @@ app.use("/api", async (req, res, next) => {
   req.authUser = user;
   next();
 });
+app.use("/api/templates", templatesRouter); // modelos de proposta/contrato
 app.use("/api/summary", summaryRouter); // resumo da página inicial (exige sessão)
 app.use("/api/opportunities", opportunitiesRouter); // funil de vendas (exige sessão: está depois do guarda acima)
 app.post("/api/change-password", async (req, res) => {
@@ -178,7 +180,7 @@ const SPEC = {
   },
   services: { name: (v) => text(v, "nome", 80, true), default_price: (v) => int(v, "preço padrão", { min: 0, max: 100_000_000_000 }) ?? 0, active: (v) => bool01(v, "ativo") },
   proposals: {
-    client_id: (v) => int(v, "cliente", { min: 1 }), service: (v) => text(v, "serviço", 80, true), scope: (v) => text(v, "escopo", 4000),
+    client_id: (v) => int(v, "cliente", { min: 1 }), service: (v) => text(v, "serviço", 80, true), scope: (v) => text(v, "escopo", 8000),
     value: (v) => money(v, "valor"), deadline: (v) => date(v, "prazo"), valid_until: (v) => date(v, "validade"), status: (v) => oneOf(v, "status", PROPOSAL_STATUS),
   },
   projects: {
