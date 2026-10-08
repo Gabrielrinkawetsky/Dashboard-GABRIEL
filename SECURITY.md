@@ -7,7 +7,7 @@ Verificação: `npm run build`, `npm run test:auth` (login/sessão) e `npm run t
 Os testes rodam o servidor numa pasta temporária com banco próprio: não tocam em `data/` nem no `.env`.
 
 ## Superfície
-- **Pública:** `POST /api/login`, `POST /api/logout`, `GET /api/session`, `POST /api/webhooks/payments` (este exige o segredo próprio) e os arquivos estáticos do build.
+- **Pública:** `POST /api/login`, `POST /api/logout`, `GET /api/session`, `POST /api/webhooks/payments` (este exige o segredo próprio), `POST /api/webhooks/asaas` (exige `ASAAS_WEBHOOK_TOKEN`; valor e status vêm da API do Asaas, veja ASAAS.md) e os arquivos estáticos do build.
 - **Exige sessão:** todo o resto de `/api` (verificado no servidor; esconder botão não é controle).
 - Sistema de um único administrador e uma única empresa: não há isolamento entre usuários/empresas para testar (troca de IDs só alcança dados do próprio dono).
 

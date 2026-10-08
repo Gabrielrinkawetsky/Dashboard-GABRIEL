@@ -92,3 +92,15 @@ await tx(async () => {
   const ins = db.prepare("INSERT INTO services (name, default_price) VALUES (?, ?)");
   for (const [n, p] of [["Landing page", 150000], ["E-commerce", 450000], ["Site institucional", 250000], ["Sistema personalizado", 800000], ["Manutenção e suporte", 15000]]) await ins.run(n, p);
 });
+
+// Colunas adicionadas depois (bancos antigos ganham a coluna, sem perder dados).
+const addColumn = async (table, column, def) => {
+  const cols = await db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all();
+  if (!cols.some((c) => c.name === column)) await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+};
+await addColumn("clients", "cpf_cnpj", "TEXT");
+await addColumn("clients", "asaas_customer_id", "TEXT");
+await addColumn("installments", "asaas_payment_id", "TEXT");
+await addColumn("installments", "asaas_invoice_url", "TEXT");
+await addColumn("installments", "asaas_status", "TEXT");
+await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS installments_asaas ON installments(asaas_payment_id) WHERE asaas_payment_id IS NOT NULL");

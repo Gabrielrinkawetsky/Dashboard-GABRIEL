@@ -15,6 +15,8 @@ export default function SettingsPage(_: PageProps) {
   const [secret, setSecret] = useState<string | null>(null);
   const hasDemo = d.clients.some((c) => c.demo);
   const hook = `${location.origin}/api/webhooks/payments`;
+  const asaasHook = `${location.origin}/api/webhooks/asaas`;
+  const asaas = d.integration.asaas;
 
   const save = (e: FormEvent) => { e.preventDefault(); void run(() => api.put("settings", f), "Configurações salvas"); };
   const addSvc = (e: FormEvent) => {
@@ -64,11 +66,32 @@ export default function SettingsPage(_: PageProps) {
         </Card>
 
         <Card>
-          <Title action={<Badge tone="warn">Provedor não conectado</Badge>}>Integração de pagamentos</Title>
-          <p className="mb-3 text-sm text-slate-400">
-            O painel já recebe confirmações, cancelamentos e estornos por webhook, sem contar o mesmo evento duas vezes. Nenhum provedor de cobrança está conectado ainda:
-            quando você escolher o meio de recebimento, o provedor deve enviar os eventos para o endereço abaixo.
+          <Title action={asaas.configured
+            ? <Badge tone="good">{asaas.env === "sandbox" ? "Asaas conectado (sandbox)" : "Asaas conectado"}</Badge>
+            : <Badge tone="warn">Asaas não conectado</Badge>}>Asaas</Title>
+          {asaas.configured ? (
+            <p className="mb-3 text-sm text-slate-400">
+              Em Financeiro, use “Cobrar no Asaas” numa parcela: o painel cria a cobrança (o cliente escolhe PIX, boleto ou cartão) e copia o link de pagamento.
+              Quando o cliente paga, o Asaas avisa o painel e o pagamento entra sozinho. O cliente precisa ter CPF ou CNPJ cadastrado.
+            </p>
+          ) : (
+            <ol className="mb-3 list-decimal space-y-1 pl-5 text-sm text-slate-400">
+              <li>No Asaas, abra Integrações → Chaves de API e gere uma chave.</li>
+              <li>Na Vercel (ou no .env), cadastre <code className="text-slate-200">ASAAS_API_KEY</code> com essa chave e faça um novo deploy.</li>
+              <li>Volte aqui para configurar o webhook.</li>
+            </ol>
+          )}
+          <Field label="URL do webhook do Asaas">
+            <div className="flex gap-2"><input className="field" readOnly value={asaasHook} /><button type="button" className="btn" aria-label="Copiar URL" onClick={() => void copy(asaasHook)}><Copy className="h-4 w-4" /></button></div>
+          </Field>
+          <p className="mt-2 text-xs text-slate-500">
+            {asaas.webhook
+              ? "Token do webhook configurado. Confira no Asaas (Integrações → Webhooks) se a fila está ativa."
+              : "Webhook ainda não configurado: no Asaas, em Integrações → Webhooks, crie um webhook com esta URL, os eventos de Cobrança e um token de autenticação. Cadastre o mesmo token em ASAAS_WEBHOOK_TOKEN. Até lá, use o botão de atualizar em cada parcela."}
           </p>
+          <details className="mt-4 text-sm">
+            <summary className="cursor-pointer text-slate-400">Webhook genérico (outros provedores)</summary>
+            <div className="mt-3">
           <Field label="URL do webhook">
             <div className="flex gap-2"><input className="field" readOnly value={hook} /><button type="button" className="btn" aria-label="Copiar URL" onClick={() => void copy(hook)}><Copy className="h-4 w-4" /></button></div>
           </Field>
@@ -84,6 +107,8 @@ export default function SettingsPage(_: PageProps) {
   "type": "payment.confirmed | payment.refunded | payment.canceled",
   "payment_id": "id do pagamento", "installment_id": 12,
   "amount": 50000 /* centavos */, "paid_at": "2026-10-05" }`}</pre>
+            </div>
+          </details>
         </Card>
 
         <Card>

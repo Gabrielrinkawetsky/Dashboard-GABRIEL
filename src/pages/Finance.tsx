@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, Plus, RefreshCw, Send, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { useStore } from "../store";
 import { Badge, Card, DemoTag, Empty, Field, Modal, MoneyInput, PageHeader, statusTone, Title } from "../ui";
 import { brl, clientLabel, fmtDate, instPaid, instStatus, metrics, range, todayISO } from "../lib";
 import { Kpi, PaymentModal, type PageProps } from "./shared";
+import type { Installment } from "../types";
 
 function ExpenseModal({ onClose }: { onClose: () => void }) {
   const { data, run } = useStore();
@@ -64,6 +65,43 @@ function ChargeModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+const ASAAS_STATUS: Record<string, string> = {
+  PENDING: "aguardando pagamento", OVERDUE: "vencida no Asaas", CONFIRMED: "confirmada", RECEIVED: "recebida",
+  RECEIVED_IN_CASH: "recebida em dinheiro", REFUNDED: "estornada", DELETED: "excluída no Asaas",
+};
+
+/** Cobrança da parcela no Asaas: criar, abrir/copiar o link, atualizar o status e cancelar. */
+function AsaasActions({ inst, paid }: { inst: Installment; paid: boolean }) {
+  const { run, notify } = useStore();
+  const [busy, setBusy] = useState(false);
+  const act = async (fn: () => Promise<unknown>, ok?: string) => { setBusy(true); await run(fn, ok); setBusy(false); };
+  const copy = (url: string) => navigator.clipboard.writeText(url).then(() => notify("ok", "Link de pagamento copiado"), () => notify("err", "Não foi possível copiar"));
+  const id = inst.asaas_payment_id;
+  if (!id) {
+    if (paid) return null;
+    return (
+      <button className="btn !px-2.5 !py-1" disabled={busy} title="Criar cobrança (PIX, boleto ou cartão) no Asaas"
+        onClick={() => void act(async () => { const r = await api.asaasCharge(inst.id); if (r.invoiceUrl) await copy(r.invoiceUrl); }, "Cobrança criada no Asaas")}>
+        <Send className="h-3.5 w-3.5" /> {busy ? "Criando…" : "Cobrar no Asaas"}
+      </button>
+    );
+  }
+  if (id.startsWith("pendente-")) return <span className="text-xs text-slate-500">Criando no Asaas…</span>;
+  const icon = "btn !px-2 !py-1";
+  return (
+    <div className="flex items-center justify-end gap-1">
+      <span className="mr-1 text-xs text-slate-400">{ASAAS_STATUS[inst.asaas_status ?? ""] ?? inst.asaas_status ?? "Asaas"}</span>
+      {inst.asaas_invoice_url && <>
+        <a className={icon} href={inst.asaas_invoice_url} target="_blank" rel="noopener noreferrer" aria-label="Abrir link de pagamento" title="Abrir link de pagamento"><ExternalLink className="h-3.5 w-3.5" /></a>
+        <button className={icon} aria-label="Copiar link de pagamento" title="Copiar link de pagamento" onClick={() => void copy(inst.asaas_invoice_url!)}><Copy className="h-3.5 w-3.5" /></button>
+      </>}
+      <button className={icon} disabled={busy} aria-label="Atualizar status pelo Asaas" title="Atualizar status pelo Asaas" onClick={() => void act(() => api.asaasSync(inst.id), "Status atualizado")}><RefreshCw className="h-3.5 w-3.5" /></button>
+      {!paid && <button className={icon} disabled={busy} aria-label="Cancelar cobrança no Asaas" title="Cancelar cobrança no Asaas"
+        onClick={() => { if (confirm("Cancelar esta cobrança no Asaas? O link deixa de funcionar.")) void act(() => api.asaasCancel(inst.id), "Cobrança cancelada no Asaas"); }}><X className="h-3.5 w-3.5" /></button>}
+    </div>
+  );
+}
+
 export default function Finance(_: PageProps) {
   const { data, filters, run } = useStore();
   const d = data!;
@@ -120,7 +158,12 @@ export default function Finance(_: PageProps) {
                       <td className="td text-right">{brl(i.amount)}</td>
                       <td className="td text-right text-emerald-300">{brl(paid)}</td>
                       <td className="td"><Badge tone={statusTone[st] as never}>{st}</Badge></td>
-                      <td className="td text-right">{st !== "paga" && <button className="btn !px-2.5 !py-1" onClick={() => setPay(i.id)}>Registrar</button>}</td>
+                      <td className="td text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          {d.integration.asaas.configured && <AsaasActions inst={i} paid={st === "paga"} />}
+                          {st !== "paga" && <button className="btn !px-2.5 !py-1" onClick={() => setPay(i.id)}>Registrar</button>}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}

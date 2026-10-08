@@ -4,7 +4,8 @@ import { db, tx } from "./db.js";
 import { addMonths, today } from "./dates.js";
 import { authenticate, changePassword, cookie, createSession, getSession, loginAllowed, revokeSession, safeEqual } from "./auth.js";
 import { removeDemo, seedDemo } from "./demo.js";
-import { Invalid, bool01, checklist, date, email, int, isDate, isPlainObject, money, oneOf, text } from "./validate.js";
+import { applyPayment, asaasConfigured, asaasEnv, cancelCharge, createCharge, fetchPayment, syncInstallment } from "./asaas.js";
+import { Invalid, bool01, checklist, cpfCnpj, date, email, int, isDate, isPlainObject, money, oneOf, text } from "./validate.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -20,7 +21,7 @@ app.use((req, res, next) => {
   res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
   if (process.env.NODE_ENV === "production") res.setHeader("Strict-Transport-Security", "max-age=31536000");
   if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store");
-  if (req.path.startsWith("/api") && !["GET", "HEAD", "OPTIONS"].includes(req.method) && req.path !== "/api/webhooks/payments") {
+  if (req.path.startsWith("/api") && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !req.path.startsWith("/api/webhooks/")) {
     if (!req.is("application/json")) return res.status(415).json({ error: "Envie JSON" });
     if (req.get("sec-fetch-site") === "cross-site") return res.status(403).json({ error: "Origem não autorizada" });
     const origin = req.get("origin");
@@ -109,6 +110,29 @@ app.post("/api/webhooks/payments", async (req, res) => {
   }
 });
 
+// Asaas: autenticado pelo token do webhook (cabeçalho asaas-access-token). O corpo só diz QUAL cobrança mudou;
+// o estado vem da API do Asaas. Eventos que não interessam respondem 200: respostas de erro seguidas fazem o Asaas
+// interromper a fila. Erro 500 só quando vale tentar de novo (Asaas ou banco fora do ar).
+app.post("/api/webhooks/asaas", async (req, res) => {
+  const token = process.env.ASAAS_WEBHOOK_TOKEN;
+  if (!token || !asaasConfigured()) return fail(res, 503, "Integração com o Asaas não configurada");
+  if (hookBlocked(req.ip)) { res.setHeader("Retry-After", "60"); return fail(res, 429, "Muitas tentativas"); }
+  if (!safeEqual(req.get("asaas-access-token"), token)) { hookFail(req.ip); return fail(res, 401, "Token inválido"); }
+  const b = req.body;
+  const id = isPlainObject(b) && isPlainObject(b.payment) ? b.payment.id : undefined;
+  if (typeof b?.event !== "string" || !b.event.startsWith("PAYMENT_") || typeof id !== "string" || !ID_RE.test(id)) return res.json({ ok: true, result: "ignorado" });
+  try {
+    // Cobrança excluída pode não existir mais na API: basta saber qual era.
+    const p = b.event === "PAYMENT_DELETED" ? { id, externalReference: b.payment.externalReference, deleted: true } : await fetchPayment(id);
+    const result = await applyPayment(p);
+    if (!result.startsWith("ignorado")) console.log(`[asaas] ${b.event} ${id}: ${result}`);
+    res.json({ ok: true, result });
+  } catch (e) {
+    console.error(`[asaas] erro ao processar ${b.event} ${id}:`, e.message);
+    fail(res, 500, "Erro ao processar evento");
+  }
+});
+
 // ---------- Autenticação ----------
 app.post("/api/login", async (req, res) => {
   const { username, password } = req.body ?? {};
@@ -153,7 +177,7 @@ const PROPOSAL_STATUS = ["rascunho", "enviada", "aprovada", "recusada", "expirad
 const SPEC = {
   clients: {
     name: (v) => text(v, "nome", 120, true), company: (v) => text(v, "empresa", 120), email: (v) => email(v),
-    phone: (v) => text(v, "telefone", 40), notes: (v) => text(v, "observações", 4000),
+    phone: (v) => text(v, "telefone", 40), notes: (v) => text(v, "observações", 4000), cpf_cnpj: (v) => cpfCnpj(v),
   },
   services: { name: (v) => text(v, "nome", 80, true), default_price: (v) => int(v, "preço padrão", { min: 0, max: 100_000_000_000 }) ?? 0, active: (v) => bool01(v, "ativo") },
   proposals: {
@@ -205,7 +229,10 @@ app.get("/api/data", async (_req, res) => {
   res.json({
     clients, services, proposals, projects: projects.map((p) => ({ ...p, checklist: JSON.parse(p.checklist || "[]") })),
     history, installments, payments, expenses, recurring, settings,
-    integration: { webhookConfigured: Boolean(process.env.WEBHOOK_SECRET), providerConnected: false },
+    integration: {
+      webhookConfigured: Boolean(process.env.WEBHOOK_SECRET), providerConnected: asaasConfigured(),
+      asaas: { configured: asaasConfigured(), env: asaasEnv(), webhook: Boolean(process.env.ASAAS_WEBHOOK_TOKEN) },
+    },
   });
 });
 
@@ -306,6 +333,20 @@ app.post("/api/installments", async (req, res) => {
     res.json({ ok: true });
   } catch (e) { fail(res, e.code ?? 500, e.code ? e.message : "Erro ao salvar"); }
 });
+
+// Cobrança no Asaas a partir de uma parcela
+const asaasRoute = (fn) => async (req, res) => {
+  const id = idParam(req);
+  if (id === null) return fail(res, 404, "Parcela não encontrada");
+  try { res.json({ ok: true, ...(await fn(id)) }); }
+  catch (e) {
+    if (!e.code) console.error("[asaas] erro:", e.message);
+    fail(res, e.code ?? 500, e.code ? e.message : "Erro ao falar com o Asaas");
+  }
+};
+app.post("/api/installments/:id/asaas", asaasRoute((id) => createCharge(id)));
+app.post("/api/installments/:id/asaas/sync", asaasRoute(async (id) => ({ result: await syncInstallment(id) })));
+app.delete("/api/installments/:id/asaas", asaasRoute(async (id) => { await cancelCharge(id); }));
 
 app.post("/api/projects/:id/notes", async (req, res) => {
   try {

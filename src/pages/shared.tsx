@@ -32,7 +32,7 @@ function Form({ onSubmit, busy, children, submit = "Salvar", onClose }: { onSubm
 
 export function ClientModal({ client, onClose }: { client?: Client; onClose: () => void }) {
   const { run } = useStore();
-  const [f, setF] = useState({ name: client?.name ?? "", company: client?.company ?? "", email: client?.email ?? "", phone: client?.phone ?? "", notes: client?.notes ?? "" });
+  const [f, setF] = useState({ name: client?.name ?? "", company: client?.company ?? "", cpf_cnpj: client?.cpf_cnpj ?? "", email: client?.email ?? "", phone: client?.phone ?? "", notes: client?.notes ?? "" });
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const save = async () => {
@@ -45,7 +45,10 @@ export function ClientModal({ client, onClose }: { client?: Client; onClose: () 
     <Modal title={client ? "Editar cliente" : "Novo cliente"} onClose={onClose}>
       <Form onSubmit={save} busy={busy} onClose={onClose}>
         <Field label="Nome *"><input className="field" required value={f.name} onChange={set("name")} autoFocus /></Field>
-        <Field label="Empresa"><input className="field" value={f.company} onChange={set("company")} /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Empresa"><input className="field" value={f.company} onChange={set("company")} /></Field>
+          <Field label="CPF ou CNPJ" hint="Necessário para cobrar pelo Asaas"><input className="field" inputMode="numeric" maxLength={20} value={f.cpf_cnpj} onChange={set("cpf_cnpj")} /></Field>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <Field label="E-mail"><input className="field" type="email" value={f.email} onChange={set("email")} /></Field>
           <Field label="Telefone"><input className="field" value={f.phone} onChange={set("phone")} /></Field>

@@ -63,3 +63,17 @@ export function checklist(v) {
     return { text: text(item.text, "item do checklist", 200, true), done: Boolean(item.done) };
   });
 }
+
+/** CPF (11 dígitos) ou CNPJ (14), com dígitos verificadores. Guarda só os números. */
+export function cpfCnpj(v, field = "CPF/CNPJ") {
+  const s = text(v, field, 20);
+  if (s === null) return null;
+  const n = s.replace(/[.\-/\s]/g, "");
+  const dv = (digits, weights) => { const r = weights.reduce((a, w, i) => a + w * Number(digits[i]), 0) % 11; return r < 2 ? 0 : 11 - r; };
+  const ok = /^\d+$/.test(n) && !/^(\d)\1+$/.test(n) && (
+    n.length === 11 ? dv(n, [10, 9, 8, 7, 6, 5, 4, 3, 2]) === +n[9] && dv(n, [11, 10, 9, 8, 7, 6, 5, 4, 3, 2]) === +n[10]
+    : n.length === 14 ? dv(n, [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]) === +n[12] && dv(n, [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]) === +n[13]
+    : false);
+  if (!ok) throw new Invalid(`${field} inválido`);
+  return n;
+}

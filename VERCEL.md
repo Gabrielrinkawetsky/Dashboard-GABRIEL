@@ -11,6 +11,7 @@ Na Vercel não existe disco permanente, então o banco fica no Turso (SQLite na 
    - `ADMIN_PASSWORD`: a senha da primeira conta (15 a 128 caracteres)
    - `APP_ORIGIN`: o endereço exato do painel, por exemplo `https://dashboard-gabriel.vercel.app`
    - `WEBHOOK_SECRET`: opcional; um texto aleatório longo. Sem ele, o webhook de pagamentos fica desligado.
+   - `ASAAS_API_KEY` e `ASAAS_WEBHOOK_TOKEN`: opcionais, para a integração com o Asaas (veja ASAAS.md).
 4. Faça um novo deploy (Deployments → Redeploy).
 5. Entre com o usuário `gabriel` e a senha de `ADMIN_PASSWORD`.
 6. Apague `ADMIN_PASSWORD` da Vercel. Ela só cria a conta quando o banco ainda não tem nenhuma; nunca altera uma conta existente.

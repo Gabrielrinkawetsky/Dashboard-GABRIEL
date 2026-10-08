@@ -24,4 +24,7 @@ export const api = {
   put: (url: string, b: unknown) => call("PUT", `/api/${url}`, b),
   del: (url: string) => call("DELETE", `/api/${url}`),
   secret: () => call<{ secret: string }>("GET", "/api/webhook-secret"),
+  asaasCharge: (installmentId: number) => call<{ invoiceUrl?: string }>("POST", `/api/installments/${installmentId}/asaas`),
+  asaasSync: (installmentId: number) => call<{ result: string }>("POST", `/api/installments/${installmentId}/asaas/sync`),
+  asaasCancel: (installmentId: number) => call("DELETE", `/api/installments/${installmentId}/asaas`),
 };
