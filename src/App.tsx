@@ -119,7 +119,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const go = (id: string) => { location.hash = id; };
 
   const owner = data?.settings.owner_name || "Gabriel Ribeiro Silva";
-  const company = data?.settings.company_name || "Minha empresa";
+  const company = data?.settings.company_name || "GR Studio";
   const Page = { visao: Overview, funil: Funnel, clientes: Clients, propostas: Proposals, projetos: Projects, financeiro: Finance, recorrencias: RecurringPage, relatorios: Reports, config: SettingsPage }[page];
 
   return (

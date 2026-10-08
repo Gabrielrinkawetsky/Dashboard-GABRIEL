@@ -11,7 +11,7 @@ import type { PageProps } from "./shared";
 export default function SettingsPage(_: PageProps) {
   const { data, run, notify } = useStore();
   const d = data!;
-  const [f, setF] = useState({ company_name: d.settings.company_name ?? "", owner_name: d.settings.owner_name ?? "Gabriel Ribeiro Silva", email: d.settings.email ?? "", phone: d.settings.phone ?? "" });
+  const [f, setF] = useState({ company_name: d.settings.company_name ?? "GR Studio", owner_name: d.settings.owner_name ?? "Gabriel Ribeiro Silva", email: d.settings.email ?? "", phone: d.settings.phone ?? "" });
   const [svc, setSvc] = useState({ name: "", price: 0 });
   const [secret, setSecret] = useState<string | null>(null);
   const hasDemo = d.clients.some((c) => c.demo);
