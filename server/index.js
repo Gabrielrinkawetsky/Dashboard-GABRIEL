@@ -5,6 +5,7 @@ import { addMonths, today } from "./dates.js";
 import { authenticate, changePassword, cookie, createSession, getSession, loginAllowed, revokeSession, safeEqual } from "./auth.js";
 import { removeDemo, seedDemo } from "./demo.js";
 import { leadRouter, opportunitiesRouter, originList } from "./funnel.js";
+import { summaryRouter } from "./summary.js";
 import { Invalid, bool01, checklist, date, email, int, isDate, isPlainObject, money, oneOf, text } from "./validate.js";
 
 const app = express();
@@ -154,6 +155,7 @@ app.use("/api", async (req, res, next) => {
   req.authUser = user;
   next();
 });
+app.use("/api/summary", summaryRouter); // resumo da página inicial (exige sessão)
 app.use("/api/opportunities", opportunitiesRouter); // funil de vendas (exige sessão: está depois do guarda acima)
 app.post("/api/change-password", async (req, res) => {
   const { currentPassword, newPassword } = req.body ?? {};

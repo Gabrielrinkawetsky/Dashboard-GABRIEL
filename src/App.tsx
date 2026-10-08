@@ -45,12 +45,13 @@ function FilterBar({ page }: { page: PageId }) {
   const { data, filters: f, setFilters, resetFilters } = useStore();
   const [show, setShow] = useState(false); // no celular os filtros ficam recolhidos
   if (page === "config" || page === "funil") return null; // o funil tem busca e filtros próprios
-  const statuses = STATUS_OPTIONS[page];
+  const onlyPeriod = page === "visao"; // a visão geral só usa o período
+  const statuses = onlyPeriod ? undefined : STATUS_OPTIONS[page];
   const usePeriod = !["clientes", "recorrencias", "projetos"].includes(page);
-  const useSvc = !["clientes", "recorrencias"].includes(page);
+  const useSvc = !onlyPeriod && !["clientes", "recorrencias"].includes(page);
   return (
     <div className="glass mb-5 flex flex-wrap items-center gap-2 rounded-2xl p-3">
-      <div className="relative min-w-40 flex-1">
+      <div className={`relative min-w-40 flex-1 ${onlyPeriod ? "hidden" : ""}`}>
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
         <input className="field pl-9" placeholder="Buscar…" aria-label="Buscar" value={f.q} onChange={(e) => setFilters({ q: e.target.value })} />
       </div>
@@ -58,7 +59,7 @@ function FilterBar({ page }: { page: PageId }) {
         <SlidersHorizontal className="h-4 w-4" /> Filtros
       </button>
       <div className={`${show ? "flex" : "hidden"} w-full flex-wrap items-center gap-2 sm:contents`}>
-      {page !== "clientes" && (
+      {page !== "clientes" && !onlyPeriod && (
         <select className="field w-auto" aria-label="Cliente" value={f.clientId} onChange={(e) => setFilters({ clientId: e.target.value })}>
           <option value="">Todos os clientes</option>
           {data?.clients.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}

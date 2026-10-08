@@ -10,3 +10,14 @@ export const addMonths = (iso, n) => {
   const [y, m, d] = iso.split("-").map(Number);
   return ymd(new Date(y, m - 1 + n, Math.min(d, new Date(y, m + n, 0).getDate())));
 };
+
+// Soma n dias a uma data YYYY-MM-DD (ao meio-dia, para não sofrer com horário de verão)
+export const addDays = (iso, n) => {
+  const [y, m, d] = iso.split("-").map(Number);
+  return ymd(new Date(y, m - 1, d + n, 12));
+};
+// Dias de calendário entre duas datas (b - a)
+export const diffDays = (a, b) => {
+  const t = (iso) => { const [y, m, d] = iso.split("-").map(Number); return Date.UTC(y, m - 1, d); };
+  return Math.round((t(b) - t(a)) / 86_400_000);
+};
