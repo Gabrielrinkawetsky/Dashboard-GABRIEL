@@ -87,7 +87,7 @@ export default function Reports(_: PageProps) {
             </Card>
             <Card>
               <Title>Pagamentos em atraso</Title>
-              {!late.length ? <Empty title="Nenhum pagamento em atraso 🎉" /> : (
+              {!late.length ? <Empty title="Nenhum pagamento em atraso" /> : (
                 <ul className="divide-y divide-white/5">
                   {late.map((i) => {
                     const days = Math.round((Date.parse(todayISO()) - Date.parse(i.due_date)) / 864e5);
