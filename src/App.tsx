@@ -146,7 +146,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             <p className="text-xs text-slate-400">{company}</p>
             <p className="text-sm font-semibold">{NAV.find((n) => n.id === page)?.label}</p>
           </div>
-          <div className="hidden text-sm text-slate-400 lg:block">Olá, <span className="font-medium text-slate-100">{owner.split(" ")[0]}</span> 👋</div>
+          <div className="hidden text-sm text-slate-400 lg:block">Olá, <span className="font-medium text-slate-100">{owner.split(" ")[0]}</span></div>
           <div className="flex items-center gap-3">
             <div className="text-right"><p className="text-sm font-medium leading-tight">{owner}</p><p className="text-xs text-slate-500">Administrador</p></div>
             <img src="/avatar.jpeg" alt={owner} width={40} height={40} className="h-10 w-10 rounded-full object-cover ring-2 ring-violet/60" style={{ objectPosition: "50% 30%" }} />
