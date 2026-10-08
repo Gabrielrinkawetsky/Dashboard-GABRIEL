@@ -9,7 +9,6 @@ import { brl, fmtDate, todayISO } from "../lib";
 import { OPP_SOURCES, OPP_STAGES, type Board, type OppDetail, type Opportunity, type Paged } from "../types";
 import type { PageProps } from "./shared";
 
-const OPEN = OPP_STAGES.slice(0, 5);
 const stageTone = (s: string) => (s === "Ganho" ? "good" : s === "Perdido" ? "bad" : s === "Novo lead" ? "muted" : "violet");
 
 function NextContact({ date }: { date: string | null }) {
@@ -341,4 +340,3 @@ export default function Funnel({ go }: PageProps) {
     </>
   );
 }
-void OPEN;

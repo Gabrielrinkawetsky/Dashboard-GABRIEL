@@ -15,6 +15,14 @@ export default function SettingsPage(_: PageProps) {
   const [secret, setSecret] = useState<string | null>(null);
   const hasDemo = d.clients.some((c) => c.demo);
   const hook = `${location.origin}/api/webhooks/payments`;
+  const captureUrl = `${location.origin}/captura`;
+  const [origins, setOrigins] = useState(d.settings.lead_allowed_origins ?? "");
+  const embed = `fetch("${location.origin}/api/public/lead", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ name, email, phone, company, service, message, website: "" }),
+});
+// "website" é o campo-isca contra robôs: envie sempre vazio.`;
 
   const save = (e: FormEvent) => { e.preventDefault(); void run(() => api.put("settings", f), "Configurações salvas"); };
   const addSvc = (e: FormEvent) => {
@@ -33,6 +41,23 @@ export default function SettingsPage(_: PageProps) {
       <PageHeader title="Configurações" />
       <div className="grid gap-4 xl:grid-cols-2 [&>*]:min-w-0">
         <PasswordSettings />
+        <Card>
+          <Title>Captura de leads</Title>
+          <p className="mb-3 text-sm text-slate-400">Divulgue este endereço (bio do Instagram, WhatsApp, e-mail). Quem preencher entra sozinho no Funil como "Novo lead", sem duplicar contatos.</p>
+          <Field label="Endereço do formulário">
+            <div className="flex gap-2"><input className="field" readOnly value={captureUrl} /><button type="button" className="btn" aria-label="Copiar endereço do formulário" onClick={() => void copy(captureUrl)}><Copy className="h-4 w-4" /></button></div>
+          </Field>
+          <form className="mt-3 space-y-2" onSubmit={(e) => { e.preventDefault(); void run(() => api.put("settings", { lead_allowed_origins: origins }), "Sites autorizados salvos"); }}>
+            <Field label="Sites que podem enviar leads para cá" hint="Só se você hospedar o formulário em outro site. Separe por vírgula, no formato https://seusite.com.br (sem barra no final). Vazio = apenas o formulário acima.">
+              <input className="field" value={origins} placeholder="https://seusite.com.br" onChange={(e) => setOrigins(e.target.value)} />
+            </Field>
+            <button className="btn">Salvar sites autorizados</button>
+          </form>
+          <details className="mt-3 text-sm text-slate-400">
+            <summary className="cursor-pointer">Como usar em outro site</summary>
+            <pre className="mt-2 overflow-x-auto rounded-xl bg-black/30 p-3 text-xs text-slate-300">{embed}</pre>
+          </details>
+        </Card>
         <Card>
           <Title>Dados da empresa</Title>
           <form onSubmit={save} className="space-y-3">

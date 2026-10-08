@@ -1,13 +1,15 @@
 import Login from "./Login";
 import { useCallback, useEffect, useState } from "react";
 import {
-  BarChart3, CheckCircle2, FileText, FolderKanban, LayoutDashboard, LogOut, Repeat, Search, Settings, SlidersHorizontal, Users, Wallet, XCircle,
+  BarChart3, CheckCircle2, FileText, Target, FolderKanban, LayoutDashboard, LogOut, Repeat, Search, Settings, SlidersHorizontal, Users, Wallet, XCircle,
 } from "lucide-react";
 import { api } from "./api";
 import { StoreProvider, useStore } from "./store";
 import { Skeleton } from "./ui";
 import { STAGES } from "./types";
 import Overview from "./pages/Overview";
+import Funnel from "./pages/Funnel";
+import LeadForm from "./LeadForm";
 import Clients from "./pages/Clients";
 import Proposals from "./pages/Proposals";
 import Projects from "./pages/Projects";
@@ -18,6 +20,7 @@ import SettingsPage from "./pages/Settings";
 
 const NAV = [
   { id: "visao", label: "Visão geral", icon: LayoutDashboard },
+  { id: "funil", label: "Funil", icon: Target },
   { id: "clientes", label: "Clientes", icon: Users },
   { id: "propostas", label: "Propostas", icon: FileText },
   { id: "projetos", label: "Projetos", icon: FolderKanban },
@@ -41,7 +44,7 @@ const pageFromHash = (): PageId => (NAV.find((n) => n.id === location.hash.slice
 function FilterBar({ page }: { page: PageId }) {
   const { data, filters: f, setFilters, resetFilters } = useStore();
   const [show, setShow] = useState(false); // no celular os filtros ficam recolhidos
-  if (page === "config") return null;
+  if (page === "config" || page === "funil") return null; // o funil tem busca e filtros próprios
   const statuses = STATUS_OPTIONS[page];
   const usePeriod = !["clientes", "recorrencias", "projetos"].includes(page);
   const useSvc = !["clientes", "recorrencias"].includes(page);
@@ -116,7 +119,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
   const owner = data?.settings.owner_name || "Gabriel Ribeiro Silva";
   const company = data?.settings.company_name || "Minha empresa";
-  const Page = { visao: Overview, clientes: Clients, propostas: Proposals, projetos: Projects, financeiro: Finance, recorrencias: RecurringPage, relatorios: Reports, config: SettingsPage }[page];
+  const Page = { visao: Overview, funil: Funnel, clientes: Clients, propostas: Proposals, projetos: Projects, financeiro: Finance, recorrencias: RecurringPage, relatorios: Reports, config: SettingsPage }[page];
 
   return (
     <div className="flex min-h-screen">
@@ -179,6 +182,8 @@ export default function App() {
   const [auth, setAuth] = useState<boolean | null>(null);
   useEffect(() => { api.session().then((s) => setAuth(s.authenticated)).catch(() => setAuth(false)); }, []);
   const out = useCallback(() => setAuth(false), []);
+  // Página pública de captura de leads: aberta a qualquer visitante, sem login.
+  if (location.pathname.replace(/\/+$/, "") === "/captura") return <LeadForm />;
   if (auth === null) return <div className="grid min-h-screen place-items-center"><Skeleton className="h-10 w-40" /></div>;
   if (!auth) return <Login onDone={() => setAuth(true)} />;
   return (
